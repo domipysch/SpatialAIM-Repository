@@ -1,7 +1,7 @@
-"""End-to-end AIM sweep on the bundled sample dataset.
+"""End-to-end SpatialAIM sweep on the bundled sample dataset.
 
 Marked ``slow``: these run the full sweep (scanpy/squidpy) and so only run where
-``aim_env`` and the sample data are present — the CI integration job, not the
+``spatialaim_env`` and the sample data are present — the CI integration job, not the
 fast unit run. Heavy imports happen inside the test bodies, so importing this
 module during collection stays light.
 """
@@ -43,11 +43,13 @@ def _assert_run_layout(mapping_dir):
 @_needs_sample
 def test_sweep_writes_expected_outputs(tmp_path):
     """Run a small nearest_centroid sweep and check the on-disk layout."""
-    from aim.aim_config import AIMConfig
-    from aim.cli import run_one_pair
+    from spatialaim.config import SpatialAIMConfig
+    from spatialaim.cli import run_one_pair
 
     out = tmp_path / "run"
-    run_one_pair(SC, ST, out, AIMConfig(mapping="nearest_centroid", k_min=1, k_max=2))
+    run_one_pair(
+        SC, ST, out, SpatialAIMConfig(mapping="nearest_centroid", k_min=1, k_max=2)
+    )
 
     _assert_run_layout(out / "nearest_centroid")
 
@@ -61,9 +63,9 @@ def test_sweep_from_annotation_uses_the_annotated_types(tmp_path):
     """
     import anndata as ad
 
-    from aim.adata_schema import UNS_LEIDEN_RESOLUTION_ALL_GENES
-    from aim.aim_config import AIMConfig
-    from aim.cli import run_one_pair
+    from spatialaim.adata_schema import UNS_LEIDEN_RESOLUTION_ALL_GENES
+    from spatialaim.config import SpatialAIMConfig
+    from spatialaim.cli import run_one_pair
 
     cell_types = sorted(set(ad.read_h5ad(SC).obs["cellType"].astype(str)))
 
@@ -72,7 +74,7 @@ def test_sweep_from_annotation_uses_the_annotated_types(tmp_path):
         SC,
         ST,
         out,
-        AIMConfig(
+        SpatialAIMConfig(
             mapping="nearest_centroid", k_min=1, start_from_annotation="cellType"
         ),
     )
@@ -94,13 +96,13 @@ def test_sweep_from_annotation_uses_the_annotated_types(tmp_path):
 
 @_needs_sample
 def test_run_cli_end_to_end(tmp_path):
-    """The `aim run` entry point maps a single pair and writes the K output."""
+    """The `spatialaim run` entry point maps a single pair and writes the K output."""
     out = tmp_path / "run"
     result = subprocess.run(
         [
             sys.executable,
             "-m",
-            "aim",
+            "spatialaim",
             "run",
             "--scdata",
             str(SC),

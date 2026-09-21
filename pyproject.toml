@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "spatial-aim"
 dynamic = ["version"]
-description = "AIM — annotation-independent mapping of scRNA-seq references onto high-resolution spatial transcriptomics"
+description = "SpatialAIM — annotation-independent mapping of scRNA-seq references onto high-resolution spatial transcriptomics"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -30,7 +30,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
 ]
 
-# Core runtime: everything `aim run` (the sweep + analysis + metrics) needs.
+# Core runtime: everything `spatialaim run` (the sweep + analysis + metrics) needs.
 # Reference aligners (tangram/tacco/dot) are NOT dependencies — they live in
 # their own conda envs and are invoked out-of-process (see the README).
 dependencies = [
@@ -63,10 +63,10 @@ dev = [
 ]
 
 [project.scripts]
-aim = "aim.cli:main"
+spatialaim = "spatialaim.cli:main"
 
 [project.urls]
-Repository = "https://github.com/domipysch/AIM"
+Repository = "https://github.com/domipysch/SpatialAIM-Repository"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -74,7 +74,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 # Ship the reference-aligner env specs and the DOT R script alongside the package
 # so users can create the reference envs and the dot aligner can find its script.
-"aim.reference_aligners" = ["*.yml", "*.R"]
+"spatialaim.reference_aligners" = ["*.yml", "*.R"]
 
 [tool.setuptools_scm]
 # Version is derived from git tags (e.g. v0.1.0). Falls back to 0.0.0.dev* in a
@@ -92,12 +92,12 @@ disable_error_code = ["import-untyped"]
 # The Streamlit GUI was never type-checked (it lived outside mypy's scope before
 # the package restructure). Kept out of scope here; typing it is left for later.
 [[tool.mypy.overrides]]
-module = "aim.gui.*"
+module = "spatialaim.gui.*"
 ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "slow: end-to-end tests that need the full aim_env (scanpy/squidpy) and sample data",
+    "slow: end-to-end tests that need the full spatialaim_env (scanpy/squidpy) and sample data",
     "integration: multi-component tests (may shell out or touch disk)",
 ]

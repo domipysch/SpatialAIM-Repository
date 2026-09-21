@@ -1,0 +1,1786 @@
+"""Streamlit UI for browsing SpatialAIM sweep results.
+
+Launched by ``gui/__main__.py`` via ``streamlit run gui/app.py -- <args>``. Not
+meant to be run directly. Reads the up-front CLI args (sc/ST/output/K-range),
+lets the user run one mapper at a time, then browses each mapper's per-K results
+with a K slider, a live confidence-threshold slider, the UMAP + spatial plots on
+top, the report sections below, and the K-sweep plot -- with a Compare tab for
+two mappers side by side.
+"""
+
+from __future__ import annotations
+
+import argparse
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Callable, NamedTuple
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+from spatialaim import LINKAGE_METHODS, MAPPING_CHOICES
+from spatialaim.adata_schema import OBSM_UMAP_SHARED_GENES
+from spatialaim.mapping.confidence import N_TOP_STATES
+
+from spatialaim.gui import (
+    compute,
+    data_access,
+    render,
+    scaffold,
+    widgets,
+)
+from spatialaim.metrics import kselection as scores
+
+if TYPE_CHECKING:
+    from anndata import AnnData
+
+    from spatialaim.data.validate import PairFindings
+
+# --------------------------------------------------------------------------- #
+# Args & cached loaders
+# --------------------------------------------------------------------------- #
+# Everything is configured in the sidebar — the launcher only forwards the server
+# port. The K range is fixed to the full sweep (k_min = 1, k_max = L, where L is
+# the start-cluster count discovered at runtime); only the step is
+# user-editable. The agglomeration linkage is chosen in the sidebar, from the same
+# LINKAGE_METHODS the `--linkage_method` CLI flag offers.
+_DEFAULT_K_MIN: int = 1
+_DEFAULT_K_MAX: int | None = None
+_DEFAULT_K_STEP = 1
+
+# Sidebar label for the default start clusters (no annotation column chosen).
+_LEIDEN_START_LABEL = "No (default, use Leiden over-clustering)"
+_NO_ANNOTATION_LABEL = "No annotations found in scRNA data"
+# Display-only labels; the raw method names go into the run config.
+_LINKAGE_LABELS = {
+    "average": "average - allow for outlier cell types",
+    "ward": "ward - more balanced cell types",
+}
+# Display-only labels for the mapper checkboxes; the keys stay the raw names.
+_MAPPER_LABELS = {
+    "nearest_centroid": "nearest_centroid (default)",
+    "wann": "wann (preserve cell type fractions)",
+}
+
+
+@st.cache_data(show_spinner=False)
+def _selectable_methods() -> list[str]:
+    """MAPPING_CHOICES restricted to methods that can actually run here: the
+    in-process mappers are always available; a reference aligner is offered only
+    if its conda env is currently installed. Cached so conda is queried once per
+    session, not on every rerun."""
+    from spatialaim.config import _INPROCESS_METHODS
+    from spatialaim.reference_aligners.registry import available_reference_aligners
+
+    available = set(_INPROCESS_METHODS) | set(available_reference_aligners())
+    return [m for m in MAPPING_CHOICES if m in available]
+
+
+@st.cache_data(show_spinner=False)
+def _load_soft(root_str: str, k: int):
+    return data_access.load_soft(Path(root_str), k)
+
+
+@st.cache_data(show_spinner=False)
+def _coords(st_path_str: str):
+    return data_access.load_spatial_coords(Path(st_path_str))
+
+
+@st.cache_resource(show_spinner=False)
+def _scaffold_sc(
+    sc_path_str: str,
+    st_path_str: str,
+    out_str: str,
+    resolution: float,
+    start_from_annotation: str | None,
+):
+    return scaffold.load_or_build_sc(
+        Path(sc_path_str),
+        Path(st_path_str),
+        Path(out_str),
+        resolution,
+        start_from_annotation,
+    )
+
+
+def _resolution(output_dir: Path) -> float:
+    return (
+        data_access.leiden_resolution_from_config(output_dir)
+        or compute.DEFAULT_LEIDEN_RESOLUTION
+    )
+
+
+@st.cache_data(show_spinner=False)
+def _obs_columns(sc_path_str: str) -> list[str]:
+    """Annotation columns offered as start clusters, read cheaply (backed mode)."""
+    try:
+        return data_access.list_obs_columns(Path(sc_path_str))
+    except Exception:  # noqa: BLE001 - an unreadable/absent file just offers nothing
+        return []
+
+
+def _load_scaffold(
+    args: argparse.Namespace, *, warn: str | None = None
+) -> "AnnData | None":
+    """Return the cached reference scaffold, or ``None`` if it fails to build.
+
+    On failure, surface ``warn`` (with the exception appended) as an
+    ``st.warning`` when given, else fail silently — callers that can render
+    without the scaffold simply skip it.
+    """
+    try:
+        return _scaffold_sc(
+            str(args.scdata),
+            str(args.stdata),
+            str(args.output_dir),
+            _resolution(args.output_dir),
+            getattr(args, "start_from_annotation", None),
+        )
+    except Exception as exc:  # noqa: BLE001
+        if warn:
+            st.warning(f"{warn}: {exc}")
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Figure export (per-figure PNG / SVG / PDF via kaleido)
+# --------------------------------------------------------------------------- #
+_EXPORT_MIME = {
+    "png": "image/png",
+    "svg": "image/svg+xml",
+    "pdf": "application/pdf",
+}
+
+
+def _export_popover(fig, *, key: str, stem: str) -> None:
+    """A small ⬇ popover under a figure: pick a format, render it server-side
+    (kaleido), and download. Kept on-demand — the image is only built when the
+    user clicks *Generate*, so the (heavy) kaleido call never runs on a plain
+    rerun.
+
+    The generated bytes are cached in ``session_state`` under ``stem`` (not the
+    widget ``key``): ``stem`` encodes the figure's identity — K, threshold, etc. —
+    so moving the K slider (or the threshold) invalidates the cache instead of
+    serving the previous figure's image under a new filename."""
+    store = stem  # figure-identity token; changes whenever the figure changes
+    with st.popover("⬇ Export"):
+        fmt = st.radio(
+            "Format",
+            list(_EXPORT_MIME),
+            horizontal=True,
+            key=f"{key}_fmt",
+            help="PNG is always faithful; the UMAP/spatial scatter panels "
+            "rasterise inside SVG/PDF (WebGL), while bar/box/line/heatmap "
+            "figures stay true vector.",
+        )
+        if st.button("Generate", key=f"{key}_gen", width="stretch"):
+            st.session_state.pop(f"{store}_err", None)
+            try:
+                st.session_state[f"{store}_bytes"] = render.figure_to_bytes(fig, fmt)
+                st.session_state[f"{store}_ext"] = fmt
+            except Exception as exc:  # noqa: BLE001 - surfaced below
+                st.session_state.pop(f"{store}_bytes", None)
+                st.session_state[f"{store}_err"] = str(exc)
+
+        data = st.session_state.get(f"{store}_bytes")
+        if data is not None:
+            ext = st.session_state.get(f"{store}_ext", "png")
+            st.download_button(
+                f"Download .{ext}",
+                data,
+                file_name=f"{stem}.{ext}",
+                mime=_EXPORT_MIME.get(ext, "application/octet-stream"),
+                key=f"{key}_dl",
+                width="stretch",
+            )
+        if st.session_state.get(f"{store}_err"):
+            st.error(st.session_state[f"{store}_err"])
+
+
+def _plot_card(
+    fig,
+    *,
+    key: str,
+    stem: str,
+    caption: str | None = None,
+    link_group: str | None = None,
+    on_pick=None,
+) -> None:
+    """Render a Plotly figure as a report card: the chart, an optional caption,
+    and an export popover beneath it.
+
+    With ``link_group`` the chart is drawn by ``widgets.linked_plot`` instead of
+    ``st.plotly_chart``, so every card in that group highlights the same K on
+    hover and reports clicks through ``on_pick``.
+    """
+    if link_group is None:
+        st.plotly_chart(fig, width="stretch", key=key)
+    else:
+        widgets.linked_plot(fig, key=key, group=link_group, on_pick=on_pick)
+    if caption:
+        st.caption(caption)
+    _export_popover(fig, key=f"{key}_exp", stem=stem)
+
+
+# --------------------------------------------------------------------------- #
+# Small helpers
+# --------------------------------------------------------------------------- #
+def _render_card_grid(cards: list[tuple[str, Callable[[], None]]]) -> None:
+    """Lay out ``(title, body)`` cards two per row, each in a bordered container."""
+    for start in range(0, len(cards), 2):
+        cols = st.columns(2)
+        for col, (title, body) in zip(cols, cards[start : start + 2]):
+            with col, st.container(border=True):
+                st.markdown(f"**{title}**")
+                body()
+
+
+def _render_metrics(container, d: dict, level: int = 0) -> None:
+    """Show a metrics dict: scalars as a two-column table, nested dicts recursively."""
+    scalars = {k: v for k, v in d.items() if not isinstance(v, (dict, list))}
+    if scalars:
+        df = pd.DataFrame(
+            {"metric": list(scalars.keys()), "value": list(scalars.values())}
+        )
+        container.dataframe(df, hide_index=True, width="stretch")
+    for k, v in d.items():
+        if isinstance(v, dict):
+            container.markdown(f"{'#' * min(6, 4 + level)} {k}")
+            _render_metrics(container, v, level + 1)
+        elif isinstance(v, list):
+            try:
+                container.dataframe(pd.DataFrame(v), width="stretch")
+            except Exception:  # noqa: BLE001
+                container.write({k: v})
+
+
+# --------------------------------------------------------------------------- #
+# Panels
+# --------------------------------------------------------------------------- #
+def _headline(
+    mapper: str,
+    root: Path,
+    k: int,
+    args: argparse.Namespace,
+    *,
+    key_prefix: str,
+    show_shared_umap: bool = False,
+    conf_controls: bool = False,
+    threshold: float = 0.0,
+    plot_confidence: bool = False,
+) -> None:
+    """UMAP(s) + live spatial plot sharing one state legend.
+
+    When ``conf_controls`` is set and the mapper wrote per-spot confidence, the
+    confidence-threshold slider and the "Plot confidence" checkbox are rendered
+    directly below the plots, aligned under the (rightmost) spatial panel, and
+    their values drive this tab's spatial colouring. Otherwise ``threshold`` /
+    ``plot_confidence`` are taken from the arguments — the Compare tab passes
+    neither and sets ``conf_controls=False``, so it never shows the controls.
+    """
+    _P, hard, confidence = _load_soft(str(root), k)
+    coords = _coords(str(args.stdata))
+    have_conf = confidence is not None
+    have_spatial = coords is not None
+
+    # Build the reference scaffold for the UMAP panel.
+    adata_sc = _load_scaffold(args, warn="Scaffold build failed — UMAP unavailable")
+
+    have_umap = adata_sc is not None
+    # Mirror render.render_headline_figure's panel logic so the confidence
+    # controls line up under the correct (rightmost) column.
+    have_shared = (
+        have_umap and show_shared_umap and OBSM_UMAP_SHARED_GENES in adata_sc.obsm
+    )
+    n_panels = int(have_shared) + int(have_umap) + int(have_spatial)
+
+    # Reserve the plot's slot; the confidence controls render *below* it so the
+    # figure stays on top and the controls sit under the spatial panel.
+    plot_slot = st.container()
+
+    if conf_controls and have_conf and have_spatial and n_panels:
+        control_cols = st.columns(n_panels)
+        with control_cols[-1]:
+            threshold = widgets.live_slider(
+                "Confidence threshold",
+                0.0,
+                1.0,
+                0.01,
+                0.0,
+                key=f"{key_prefix}_thr",
+            )
+            plot_confidence = st.checkbox(
+                "Plot confidence",
+                value=False,
+                key=f"{key_prefix}_pconf",
+                help="Colour spots by confidence intensity instead of assigned "
+                "cell type.",
+            )
+
+    # One figure, all subplots (UMAP(s) + spatial) sharing a single state legend.
+    # Rendered by a client-side component so clicking a legend entry OR any point
+    # toggles that state (single click) / isolates it (double click); inactive
+    # states are drawn in a light colour rather than hidden.
+    if coords is None and adata_sc is None:
+        with plot_slot:
+            st.info("Nothing to plot: no spatial coords and no UMAP scaffold.")
+        return
+
+    try:
+        fig = render.render_headline_figure(
+            coords,
+            hard,
+            confidence,
+            threshold,
+            k,
+            adata_sc=adata_sc,
+            root=root,
+            plot_confidence=plot_confidence,
+            show_shared_umap=show_shared_umap,
+        )
+    except Exception as exc:  # noqa: BLE001
+        with plot_slot:
+            st.warning(f"UMAP rendering failed — showing spatial only: {exc}")
+        fig = render.render_headline_figure(
+            coords,
+            hard,
+            confidence,
+            threshold,
+            k,
+            adata_sc=None,
+            root=root,
+            plot_confidence=plot_confidence,
+        )
+    with plot_slot:
+        widgets.headline_plot(fig, key=f"{key_prefix}_headline")
+        # stem carries the figure identity (K + threshold + confidence toggle) so
+        # the export cache invalidates when any of them changes (see _export_popover).
+        stem = f"{key_prefix}_k{k:03d}_thr{int(round(threshold * 100)):03d}"
+        if plot_confidence:
+            stem += "_conf"
+        _export_popover(fig, key=f"{key_prefix}_headline_exp", stem=stem)
+
+    if coords is None:
+        st.caption("ST data has no obsm['spatial'] — no spatial plot.")
+
+
+def _render_progress(mapper: str, run: "compute.MapperRun") -> None:
+    """Progress bar for a mapper currently being computed."""
+    done, expected = run.n_done(), run.n_expected()
+    if expected:
+        st.progress(
+            min(done / expected, 1.0), text=f"Computing {mapper}: {done}/{expected} K"
+        )
+    else:
+        # Before the first K folder the sweep is still building the reference
+        # scaffold — which only over-clusters when the start clusters are Leiden's.
+        stage = (
+            "over-clustering…"
+            if run.start_from_annotation is None
+            else f"start clusters from {run.start_from_annotation}…"
+        )
+        st.progress(0.0, text=f"Computing {mapper}: {stage}")
+    st.caption("This tab will show results when the sweep finishes.")
+
+
+class _Controls(NamedTuple):
+    """Shared display controls that drive every result tab at once.
+
+    Only K and the shared-gene-UMAP toggle are global; the confidence threshold
+    and "Plot confidence" checkbox are per-tab (rendered inside each mapper tab,
+    where they can be hidden when that mapper has no confidence).
+    """
+
+    k: int
+    show_shared_umap: bool
+
+
+def _shared_controls(ks: list[int]) -> _Controls:
+    """Render the K slider and the shared-gene-UMAP toggle once, above the tabs."""
+    c1, c2 = st.columns([3, 2], vertical_alignment="center")
+    with c1:
+        k = widgets.live_select_slider(
+            "K (number of cell types)", ks, ks[0], key="ctrl_k"
+        )
+    with c2:
+        show_shared_umap = st.checkbox(
+            "Show shared-gene-only UMAP",
+            value=False,
+            key="ctrl_shared_umap",
+            help="Add the shared-gene (ST-overlap) UMAP as a third panel, left of "
+            "the all-gene UMAP.",
+        )
+    return _Controls(int(k), bool(show_shared_umap))
+
+
+def _set_ctrl_k(idx: int) -> None:
+    """on_click: move the shared K slider to option index ``idx`` (runs before the
+    slider re-instantiates, so writing its session-state key is allowed)."""
+    st.session_state["ctrl_k"] = {"value": int(idx)}
+
+
+def _pick_k_callback(state_key: str, ks_all: list[int]):
+    """``on_pick`` for a linked K-sweep card: move the shared K slider to the K
+    that was clicked. Runs as a widget callback, i.e. before the script body
+    re-instantiates the slider, so writing its session-state key is allowed."""
+
+    def _on_pick() -> None:
+        k = widgets.picked_k(state_key)
+        if k is not None and k in ks_all:
+            _set_ctrl_k(ks_all.index(k))
+            # The K slider and sibling tabs live outside this tab's fragment; ask
+            # the fragment body to escalate to a full app rerun so they follow.
+            st.session_state["_ctrl_k_pick_pending"] = True
+
+    return _on_pick
+
+
+@st.dialog("Criterion trade-offs", width="large")
+def _ksweep_scatter_dialog(
+    mapper: str, score_table: pd.DataFrame, ks_all: list[int]
+) -> None:
+    """The three criterion-vs-criterion scatters, kept out of the card body so the
+    card itself stays short."""
+    pareto_only = st.checkbox(
+        "Show only pareto-optimal points",
+        value=True,
+        key=f"ks_pareto_{mapper}",
+        help="Keep only the K that no other K beats on all three criteria at once. "
+        "A criterion that could not be computed for a K counts as its worst "
+        "possible value.",
+    )
+    mask = scores.pareto_mask(score_table) if pareto_only else None
+    group = f"ksweep_scatter_{mapper}"
+
+    for col, (x_key, y_key) in zip(st.columns(3), scores.SCATTER_PAIRS):
+        with col:
+            key = f"ks_scatter_{x_key}_{y_key}_{mapper}"
+            _plot_card(
+                render.render_ksweep_scatter_figure(
+                    score_table,
+                    scores.CRITERION[x_key],
+                    scores.CRITERION[y_key],
+                    mask=mask,
+                ),
+                key=key,
+                stem=f"{mapper}_ksweep_scatter_{x_key}_{y_key}",
+                link_group=group,
+                on_pick=_pick_k_callback(key, ks_all),
+            )
+
+    shown = (
+        f"Showing the {int(mask.sum())} pareto-optimal of {len(score_table)} K. "
+        if mask is not None
+        else ""
+    )
+    st.caption(
+        f"One dot per K, each criterion summarised by the harmonic mean of its two "
+        f"curves. {shown}Hover a dot to highlight that K in every panel and to show "
+        "the grey label-shuffle null crosshair; click a dot to set the K slider. The "
+        "axes span the nulls as well, so drag to zoom in on the dots."
+    )
+
+
+def _select_k_callback(k: int, ks_all: list[int]):
+    """``on_click`` for a "Best K" row: move the shared K slider onto that K."""
+
+    def _on_click() -> None:
+        if k in ks_all:
+            _set_ctrl_k(ks_all.index(k))
+            # The slider and sibling tabs live outside this tab's fragment; ask
+            # the fragment body to escalate to a full app rerun so they follow.
+            st.session_state["_ctrl_k_pick_pending"] = True
+
+    return _on_click
+
+
+def _best_k_rows(score_table: pd.DataFrame) -> list[tuple[str, int, float, str]]:
+    """``(description, k, score, slug)`` for the best overall K and the best K per
+    criterion.
+
+    Presentation wrapper around :func:`spatialaim.metrics.kselection.best_ks`, which the
+    sweep also writes to ``k_selection.json`` — the card and the file therefore
+    always agree. A criterion with no finite score anywhere is skipped rather than
+    reported as a winner.
+    """
+    best = scores.best_ks(score_table)
+    labels = {"overall": "**Best overall** (harmonic mean across the criteria):"} | {
+        c.key: f"**Best {c.label.lower()}** (harmonic mean):" for c in scores.CRITERIA
+    }
+    return [
+        (labels[slug], hit[0], hit[1], slug)
+        for slug, hit in best.items()
+        if hit is not None
+    ]
+
+
+def _best_overall_k(root: Path) -> int | None:
+    """One mapper's best overall K, or ``None`` while its sweep table is missing
+    or nothing in it could be scored yet. Same source as the "Choose K" card."""
+    df = data_access.ksweep_table(root)
+    if df is None or df.empty:
+        return None
+    hit = scores.best_ks(scores.score_table(df)).get("overall")
+    return None if hit is None else int(hit[0])
+
+
+def _ksweep_section(
+    mapper: str, root: Path, ks_all: list[int], current_k: int | None = None
+) -> None:
+    """The "Choose K" card: one line plot per criterion (its two curves plus their
+    harmonic mean), each criterion's winning K below it, the best overall K below
+    them, and the criterion-vs-criterion scatters behind a button.
+
+    The line plots are linked: hovering a dot highlights the same K in all three,
+    clicking one moves the K slider. Every number here — the nulls included — is
+    read from the sweep's ``k_comparison.csv``.
+
+    Collapsed, the card is a dead end unless its header says where things stand, so
+    the label carries the K on show and the best overall K.
+    """
+    df = data_access.ksweep_table(root)
+    if df is None or df.empty:
+        return
+
+    score_table = scores.score_table(df)
+    best = {
+        slug: (text, k, value) for text, k, value, slug in _best_k_rows(score_table)
+    }
+    # The best overall K is marked in all three cards, so the plots and the rows
+    # below agree on one K.
+    best_overall_k = best["overall"][1] if "overall" in best else None
+
+    label = "Choose K (number of cell types)"
+    state = []
+    if current_k is not None:
+        state.append(f"showing K = {current_k}")
+    if best_overall_k is not None:
+        state.append(f"best overall K = {best_overall_k}")
+    if state:
+        label += " — " + ", ".join(state)
+
+    with st.expander(label, expanded=False):
+        group = f"ksweep_{mapper}"
+
+        # Tint the starred rows' material star to the same amber the plots use.
+        # Streamlit renders the button's `icon` as an icon-font span, which it
+        # already aligns with the label — unlike a "★" text glyph, whose font
+        # bearings sat off-centre.
+        st.markdown(
+            "<style>div[class*='st-key-ks_bestkstar_'] button span"
+            "[data-testid='stIconMaterial']"
+            f"{{color:{render.BEST_K_COLOR};font-size:1.3rem;}}</style>",
+            unsafe_allow_html=True,
+        )
+
+        def _best_k_row(slug: str) -> None:
+            """One line: the label, then its K as the button. Skipped if unscored."""
+            entry = best.get(slug)
+            if entry is None:
+                return
+            text, k, value = entry
+            row = st.container(
+                horizontal=True, vertical_alignment="center", gap="small"
+            )
+            row.markdown(text)
+            # Star the K the plots mark — on every row that lands on it, not just
+            # the 'best overall' one. Starred rows get their own key prefix so the
+            # CSS above can tint just that icon.
+            starred = k == best_overall_k
+            prefix = "ks_bestkstar" if starred else "ks_bestk"
+            row.button(
+                f"K = {k}",
+                icon=":material/star:" if starred else None,
+                key=f"{prefix}_{slug}_{mapper}",
+                on_click=_select_k_callback(k, ks_all),
+                disabled=k not in ks_all,
+                help=f"Score {value:.2f}. Moves the K slider to K = {k}.",
+            )
+
+        # Each criterion's best K sits under its own plot; the overall winner —
+        # which spans all three — gets its own row below them.
+        for col, (index, criterion) in zip(st.columns(3), enumerate(scores.CRITERIA)):
+            with col:
+                key = f"ks_{criterion.key}_{mapper}"
+                _plot_card(
+                    render.render_ksweep_criterion_figure(
+                        df, criterion, index=index, best_k=best_overall_k
+                    ),
+                    key=key,
+                    stem=f"{mapper}_ksweep_{criterion.key}",
+                    link_group=group,
+                    on_pick=_pick_k_callback(key, ks_all),
+                )
+                _best_k_row(criterion.key)
+
+        st.divider()
+        if not best:
+            st.caption("No criterion could be scored for this sweep yet.")
+        _best_k_row("overall")
+
+        if st.button(
+            "Compare criteria against each other",
+            key=f"ks_scatter_btn_{mapper}",
+            width="stretch",
+            help="Opens the three criterion-vs-criterion scatter plots (one dot "
+            "per K) with the pareto filter.",
+        ):
+            _ksweep_scatter_dialog(mapper, score_table, ks_all)
+
+
+@st.fragment
+def _mapper_tab(
+    mapper: str,
+    args: argparse.Namespace,
+    runs: dict,
+    queue: list,
+    ctrl: _Controls | None,
+    ks_all: list[int],
+) -> None:
+    # This tab is a fragment: its own widgets (confidence-threshold slider, export
+    # popovers, pareto toggle) rerun only this tab, not every sibling tab. A
+    # linked-plot K pick, though, must move the *global* K slider and refresh every
+    # tab, so it sets this flag and we escalate to a full app rerun here.
+    if st.session_state.pop("_ctrl_k_pick_pending", False):
+        st.rerun(scope="app")
+
+    root = data_access.run_root(args.output_dir, mapper)
+    run = runs.get(mapper)
+
+    # In-progress / queued / failed states take precedence over any partial
+    # on-disk output.
+    if run is not None and run.is_running():
+        _render_progress(mapper, run)
+        return
+    if mapper in queue:
+        st.info(
+            f"🕒 Waiting for another method to finish before computing **{mapper}**…"
+        )
+        return
+    if run is not None and run.error and not data_access.list_ks(root):
+        st.error(f"'{mapper}' failed to compute — see the terminal for details.")
+        return
+
+    ks = data_access.list_ks(root)
+    if not ks:
+        st.info("No K folders found yet for this mapper.")
+        return
+    if ctrl is None or ctrl.k not in ks:
+        st.info("K not available for this method at the current shared setting.")
+        return
+
+    # A little air between the tab bar and the card.
+    st.markdown("<div style='height:0.9rem'></div>", unsafe_allow_html=True)
+    _ksweep_section(mapper, root, ks_all, current_k=ctrl.k)
+
+    _headline(
+        mapper,
+        root,
+        ctrl.k,
+        args,
+        key_prefix=f"tab_{mapper}",
+        show_shared_umap=ctrl.show_shared_umap,
+        conf_controls=True,
+    )
+
+    st.divider()
+    st.subheader("Report")
+    _report_dashboard(mapper, root, ctrl.k, args)
+
+
+_SUBSCRIPT = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+
+
+def _confidence_caption(mapper: str) -> str | None:
+    """A short, per-method explanation of how each spot's confidence is defined,
+    shown under the "Mapping Confidence — Per-Spot" card. ``None`` for mappers
+    that write no confidence (the external reference aligners), whose card is not
+    shown anyway."""
+    if mapper == "nearest_centroid":
+        dn = f"d{str(N_TOP_STATES).translate(_SUBSCRIPT)}"  # e.g. "d₄"
+        return (
+            "Each spot is assigned to its most cosine-similar cell-type centroid; "
+            "its "
+            f"confidence is the winner's *relative margin* over the top-"
+            f"{N_TOP_STATES} rivals in cosine-distance space — for the "
+            f"{N_TOP_STATES} smallest distances d₁ ≤ … ≤ {dn}, "
+            "1 − d₁ ⁄ mean(d₂…)."
+        )
+    if mapper == "wann":
+        return (
+            "Each spot gets a reliability-weighted soft vote over the cell types; its "
+            "confidence is how one-hot that vote is — 1 (normalised Shannon entropy)."
+        )
+    return None
+
+
+def _report_dashboard(
+    mapper: str, root: Path, k: int, args: argparse.Namespace
+) -> None:
+    """The per-mapper report as a grid of compact cards, each an interactive
+    Plotly figure or a small metrics table (no matplotlib)."""
+    P, hard, confidence = _load_soft(str(root), k)
+
+    # The fractions card is simply skipped if the scaffold can't be built.
+    adata_sc = _load_scaffold(args)
+
+    def _sharpness() -> None:
+        summ = data_access.load_data_json(root, k, "onehot_summary_mapping.json")
+        caption = None
+        if summ and summ.get("summary"):
+            s = summ["summary"]
+            caption = (
+                f"Gini mean {s['gini_impurity']['mean']:.3f}  ·  "
+                f"entropy mean {s['entropy']['mean']:.3f}"
+            )
+        _plot_card(
+            render.render_onehot_figure(P.max(axis=1)),
+            key=f"card_sharp_{mapper}",
+            stem=f"{mapper}_k{k:03d}_sharpness",
+            caption=caption,
+        )
+
+    def _spatial_org() -> None:
+        metrics = data_access.load_data_json(root, k, "topology_metrics.json")
+        if not metrics:
+            st.info("topology_metrics.json not found for this K.")
+            return
+        # Drop the top-level scalar table; keep the metric groups (local purity,
+        # neighbourhood enrichment).
+        nested = {kk: vv for kk, vv in metrics.items() if isinstance(vv, dict)}
+        if nested:
+            _render_metrics(st, nested)
+        else:
+            st.info("No spatial-organisation sub-metrics for this K.")
+
+    def _modularity() -> None:
+        metrics = data_access.load_data_json(root, k, "modularity_metrics.json")
+        # Only the mapping-dependent modularity belongs here; the reference-graph
+        # modularities live on the Single-cell reference tab. Coherence has no
+        # meaningful label-shuffle null, so the analysis records none.
+        keys = ("modularity_st_expression",)
+        shown = {kk: metrics[kk] for kk in keys if metrics and kk in metrics}
+        if shown:
+            _render_metrics(st, shown)
+        else:
+            st.info("modularity_metrics.json not found for this K.")
+
+    # Assemble the cards (title, body). Only include those that have data.
+    cards: list[tuple[str, Callable[[], None]]] = []
+    if adata_sc is not None:
+        cards.append(
+            (
+                "Cell-Type Fractions — Cells & Spots",
+                lambda: _plot_card(
+                    render.render_fractions_figure(adata_sc, root, k, hard),
+                    key=f"card_frac_{mapper}",
+                    stem=f"{mapper}_k{k:03d}_fractions",
+                ),
+            )
+        )
+    cossim = data_access.load_cossim_distributions(root, k)
+    if cossim:
+        cards.append(
+            (
+                "Reconstruction Cosine Similarity",
+                lambda: _plot_card(
+                    render.render_reconstruction_figure(cossim),
+                    key=f"card_recon_{mapper}",
+                    stem=f"{mapper}_k{k:03d}_reconstruction",
+                ),
+            )
+        )
+    cards.append(("Mapping Sharpness — How One-Hot", _sharpness))
+    if confidence is not None:
+        cards.append(
+            (
+                "Mapping Confidence — Per-Spot",
+                lambda: _plot_card(
+                    render.render_confidence_figure(confidence),
+                    key=f"card_conf_{mapper}",
+                    stem=f"{mapper}_k{k:03d}_confidence",
+                    caption=_confidence_caption(mapper),
+                ),
+            )
+        )
+    cards.append(("Spatial Organisation of Mapped Spots", _spatial_org))
+    cards.append(("Modularity", _modularity))
+
+    _render_card_grid(cards)
+
+
+@st.fragment
+def _compare_tab(mappers: list[str], args: argparse.Namespace, ctrl: _Controls) -> None:
+    """Compare several methods at once: one shared reference UMAP followed by each
+    selected method's spatial map side by side.
+
+    The shared-gene UMAP toggle and confidence options do not apply here (this tab
+    always shows the single all-gene reference UMAP with no confidence colouring).
+    """
+    st.subheader("Side-by-side comparison")
+
+    selected = st.pills(
+        "Methods to compare",
+        mappers,
+        selection_mode="multi",
+        default=list(mappers),
+        key="cmp_methods",
+        help="Pick two or more computed methods; their spatial maps are shown "
+        "side by side under one reference UMAP.",
+    )
+    if len(selected) < 2:
+        st.info("Select at least two methods to compare.")
+        return
+
+    # Keep the stable MAPPING_CHOICES order that `mappers` already carries.
+    selected = [m for m in mappers if m in selected]
+    k = ctrl.k
+
+    coords = _coords(str(args.stdata))
+    if coords is None:
+        st.info("ST data has no obsm['spatial'] — nothing to compare spatially.")
+        return
+
+    # Fall back to spatial-only if the reference UMAP can't be built.
+    adata_sc = _load_scaffold(
+        args, warn="Scaffold build failed — reference UMAP unavailable"
+    )
+
+    # Load each selected method's hard assignment for this K (skip any missing K).
+    hards: list[np.ndarray] = []
+    valid: list[str] = []
+    for m in selected:
+        root = data_access.run_root(args.output_dir, m)
+        if k not in data_access.list_ks(root):
+            continue
+        _P, hard, _conf = _load_soft(str(root), k)
+        hards.append(hard)
+        valid.append(m)
+    if len(valid) < 2:
+        st.info(f"Fewer than two selected methods have K={k} available.")
+        return
+
+    # One figure: reference UMAP centred on top, spatial maps in a 2-wide grid
+    # below, all sharing a single interactive state legend.
+    ref_root = data_access.run_root(args.output_dir, valid[0]) if adata_sc else None
+    fig = render.render_compare_figure(
+        coords, hards, valid, k, adata_sc=adata_sc, root=ref_root
+    )
+    widgets.headline_plot(fig, key="cmp_headline")
+    _export_popover(fig, key="cmp_headline_exp", stem=f"compare_spatial_k{k:03d}")
+
+    # Report sections below the plots — the same UI cards as a single method tab,
+    # but with every selected method combined into one plot/table per section.
+    st.divider()
+    st.subheader("Report")
+    _compare_sections(valid, hards, args, k)
+
+
+def _compare_sections(
+    valid: list[str], hards: list[np.ndarray], args: argparse.Namespace, k: int
+) -> None:
+    """Combined report cards for the Compare tab: each section overlays all
+    selected methods in a single Plotly figure or a table with one column per
+    method."""
+    roots = {m: data_access.run_root(args.output_dir, m) for m in valid}
+
+    # Gather each method's per-K data once.
+    cossims: dict[str, dict] = {}
+    maxprobs: dict[str, np.ndarray] = {}
+    spot_fracs: dict[str, list[float]] = {}
+    for m, hard in zip(valid, hards):
+        P, _hard, _conf = _load_soft(str(roots[m]), k)
+        cossims[m] = data_access.load_cossim_distributions(roots[m], k)
+        maxprobs[m] = P.max(axis=1)
+        spot_fracs[m] = [float(np.mean(hard == s)) for s in range(k)]
+
+    def _reconstruction() -> None:
+        fig = render.render_compare_reconstruction_figure(cossims)
+        if fig is None:
+            st.info("No reconstruction cosine-similarity data for these methods.")
+        else:
+            _plot_card(
+                fig, key="cmp_sec_recon", stem=f"compare_reconstruction_k{k:03d}"
+            )
+
+    def _sharpness() -> None:
+        _plot_card(
+            render.render_compare_box_figure(
+                maxprobs,
+                title="Per-spot max probability (1.0 = one-hot)",
+                ytitle="max probability",
+            ),
+            key="cmp_sec_sharp",
+            stem=f"compare_sharpness_k{k:03d}",
+        )
+
+    def _fractions() -> None:
+        _plot_card(
+            render.render_compare_fractions_figure(spot_fracs, k),
+            key="cmp_sec_frac",
+            stem=f"compare_fractions_k{k:03d}",
+            caption="Cell fractions are identical across methods (see a method tab).",
+        )
+
+    def _spatial_org() -> None:
+        # Nested metric groups (drop the top-level scalars), methods as columns.
+        cols: dict[str, dict] = {}
+        for m in valid:
+            topo = (
+                data_access.load_data_json(roots[m], k, "topology_metrics.json") or {}
+            )
+            flat: dict[str, float] = {}
+            for grp, sub in topo.items():
+                if isinstance(sub, dict):
+                    for name, val in sub.items():
+                        flat[f"{grp}.{name}"] = val
+            cols[m] = flat
+        df = pd.DataFrame(cols)
+        if df.empty:
+            st.info("No spatial-organisation metrics for these methods.")
+        else:
+            st.dataframe(df.round(4), width="stretch")
+
+    def _modularity() -> None:
+        # Only the mapping-dependent modularity, methods as columns.
+        row: dict[str, float] = {}
+        for m in valid:
+            mod = (
+                data_access.load_data_json(roots[m], k, "modularity_metrics.json") or {}
+            )
+            row[m] = mod.get("modularity_st_expression", float("nan"))
+        df = pd.DataFrame({"modularity_st_expression": row}).T
+        st.dataframe(df.round(4), width="stretch")
+
+    cards: list[tuple[str, "Callable[[], None]"]] = [
+        ("Reconstruction Cosine Similarity", _reconstruction),
+        ("Cell-Type Fractions — Cells & Spots", _fractions),
+        ("Mapping Sharpness — How One-Hot", _sharpness),
+    ]
+    cards.append(("Spatial Organisation of Mapped Spots", _spatial_org))
+    cards.append(("Modularity", _modularity))
+
+    _render_card_grid(cards)
+
+
+@st.fragment
+def _reference_tab(
+    mappers: list[str], args: argparse.Namespace, ctrl: _Controls
+) -> None:
+    """The single-cell reference view: clustering-side plots that don't depend on
+    the spot-mapping method.
+
+    The tree cut (``start_cluster_to_state``) and the reference expression are identical
+    across mappers, so this reads them from any finished mapper that has the
+    currently selected K. Shows three UMAPs on top (start clustering, and the
+    computed states on the all-gene and shared-gene embeddings), then the
+    mapper-independent sections rendered as interactive Plotly.
+    """
+    st.subheader("Single-cell reference")
+
+    # Any finished mapper carrying this K works — pick the first.
+    ref_mapper = next(
+        (
+            m
+            for m in mappers
+            if ctrl.k in data_access.list_ks(data_access.run_root(args.output_dir, m))
+        ),
+        None,
+    )
+    if ref_mapper is None:
+        st.info("No finished method has this K available yet.")
+        return
+    ref_root = data_access.run_root(args.output_dir, ref_mapper)
+
+    adata_sc = _load_scaffold(
+        args, warn="Scaffold build failed — reference view unavailable"
+    )
+    if adata_sc is None:
+        return
+
+    fig_umaps = render.render_reference_umaps_figure(adata_sc, ref_root, ctrl.k)
+    widgets.headline_plot(fig_umaps, key="ref_umaps")
+    _export_popover(
+        fig_umaps, key="ref_umaps_exp", stem=f"reference_umaps_k{ctrl.k:03d}"
+    )
+    st.caption(
+        f"K = {ctrl.k}. The start clustering and its tree cut are shared across "
+        f"methods (shown from **{ref_mapper}**)."
+    )
+
+    st.divider()
+    with st.expander("Start Clusters Merged per SpatialAIM Cell Type", expanded=True):
+        _plot_card(
+            render.render_start_cluster_merge_figure(adata_sc, ref_root, ctrl.k),
+            key="ref_start_cluster_merge",
+            stem=f"reference_start_cluster_merge_k{ctrl.k:03d}",
+        )
+    with st.expander("SpatialAIM Cell-Type Profiles", expanded=True):
+        fig_prof = render.render_state_profiles_figure(adata_sc, ref_root, ctrl.k)
+        if fig_prof is None:
+            st.info("Too few shared genes to plot the cell-type-profile heatmap.")
+        else:
+            _plot_card(
+                fig_prof,
+                key="ref_profiles",
+                stem=f"reference_state_profiles_k{ctrl.k:03d}",
+            )
+    with st.expander("Sub-Type Merge Coherence", expanded=False):
+        metrics = data_access.load_data_json(ref_root, ctrl.k, "biology_metrics.json")
+        if not metrics:
+            st.info("biology_metrics.json not found for this K.")
+        else:
+            # One table for all states: state per row, metric fields as columns
+            # (states that were skipped simply have NaN in the metric columns).
+            per_state = metrics.get("per_state", {})
+            if per_state:
+                df = pd.DataFrame.from_dict(per_state, orient="index")
+                df.insert(0, "cell type", [int(s) for s in per_state.keys()])
+                df = df.sort_values("cell type").reset_index(drop=True).round(4)
+                st.dataframe(df, hide_index=True, width="stretch")
+            agg = metrics.get("aggregate") or {}
+            parts = [f"n_perm = {metrics.get('n_perm')}"]
+            for name, val in agg.items():
+                parts.append(
+                    f"{name} = {val:.4g}"
+                    if isinstance(val, float)
+                    else f"{name} = {val}"
+                )
+            st.caption("Aggregate:   " + "   •   ".join(parts))
+    with st.expander("Modularity", expanded=False):
+        # Reference-graph modularities only (mapper-independent); the
+        # mapping-dependent modularity_st_expression lives on the method tabs.
+        mod = data_access.load_data_json(ref_root, ctrl.k, "modularity_metrics.json")
+        ref_keys = ["modularity_all", "modularity_shared"]
+        if mod and any(kk in mod for kk in ref_keys):
+            _render_metrics(st, {kk: mod[kk] for kk in ref_keys if kk in mod})
+        else:
+            st.info("modularity_metrics.json not found for this K.")
+
+
+# --------------------------------------------------------------------------- #
+# Sidebar (mapper selection + running)
+# --------------------------------------------------------------------------- #
+def _browse(kind: str, key: str) -> None:
+    """on_click callback: open a native file/folder dialog and store the chosen
+    path under session-state ``key``.
+
+    Works because the Streamlit server runs on the user's own machine, so the
+    tkinter dialog appears on their screen. Any failure (e.g. no display on a
+    remote host) is surfaced as a sidebar warning; typing the path still works.
+    """
+    st.session_state.pop("_browse_error", None)
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            if kind == "dir":
+                chosen = filedialog.askdirectory(title="Select output directory")
+            else:
+                chosen = filedialog.askopenfilename(
+                    title="Select .h5ad file",
+                    filetypes=[("AnnData h5ad", "*.h5ad"), ("All files", "*.*")],
+                )
+        finally:
+            root.update()
+            root.destroy()
+    except Exception as exc:  # noqa: BLE001
+        st.session_state["_browse_error"] = f"File dialog unavailable: {exc}"
+        return
+    if chosen:
+        st.session_state[key] = chosen
+
+
+def _clear_session() -> None:
+    """Reset paths, scaffold settings, method selection and the run queue for a
+    clean restart.
+
+    Runs as a button ``on_click`` callback (before widgets re-instantiate), which
+    is the only point Streamlit allows resetting widget-backed keys. On-disk
+    results are left untouched; any background sweep keeps running but is no
+    longer tracked.
+    """
+    st.session_state["cfg_sc"] = ""
+    st.session_state["cfg_st"] = ""
+    st.session_state["cfg_out"] = ""
+    st.session_state["cfg_linkage"] = LINKAGE_METHODS[0]
+    st.session_state["cfg_start"] = _LEIDEN_START_LABEL
+    st.session_state["runs"] = {}
+    st.session_state["queue"] = []
+    st.session_state.pop("_run_requested", None)
+    # Forget which pair was validated, so the next selection reports again.
+    st.session_state.pop("_validation_seen", None)
+    st.session_state.pop("_validation_reopen", None)
+    st.session_state.pop("_show_data_help", None)
+    # Drop transient widget state: the method checkboxes, shared controls, and
+    # every per-tab / best-K control.
+    for k in list(st.session_state.keys()):
+        if k.startswith(("add_", "done_", "tab_", "cmp", "ctrl_", "bestk_", "ks_")):
+            del st.session_state[k]
+
+
+_LOCKED_HELP = (
+    "Fixed by the runs already in this output folder: the cached reference scaffold "
+    "and every persisted tree cut are tied to it. Point the output directory "
+    "somewhere new to choose again."
+)
+
+
+def _run_lock(out_str: str) -> dict | None:
+    """The scaffold-defining settings an output folder's existing runs pin down, or
+    ``None`` when it holds no runs yet.
+
+    Read back from any mapper's ``config.yaml``. A value the config does not record
+    (an older run root) comes back as ``None`` and stays editable.
+    """
+    out_path = Path(out_str.strip()) if out_str.strip() else None
+    if out_path is None or not data_access.list_mappers(out_path):
+        return None
+    return {
+        "start_from_annotation": data_access.start_from_annotation_from_config(
+            out_path
+        ),
+        "linkage_method": data_access.linkage_method_from_config(out_path),
+    }
+
+
+def _start_cluster_row(sc_str: str, lock: dict | None) -> str | None:
+    """Sidebar picker for the start clusters; returns the annotation column or
+    ``None`` for the Leiden over-clustering.
+
+    Once an output dir holds a run, its recorded choice is shown as a disabled
+    dropdown rather than letting the two modes mix in one folder.
+    """
+    help_text = (
+        "The agglomeration tree is built over Leiden over-clusters by default; an "
+        "scRNA obs column uses that annotation's cell types instead."
+    )
+
+    def _fmt(option: str) -> str:
+        return option if option == _LEIDEN_START_LABEL else f".obs key {option}"
+
+    if lock is not None:
+        recorded = lock["start_from_annotation"]
+        st.sidebar.selectbox(
+            "Override starting clusters",
+            [recorded or _LEIDEN_START_LABEL],
+            format_func=_fmt,
+            disabled=True,
+            help=_LOCKED_HELP,
+        )
+        return recorded
+
+    sc_path = Path(sc_str.strip()) if sc_str.strip() else None
+    annotations = (
+        _obs_columns(str(sc_path)) if sc_path is not None and sc_path.is_file() else []
+    )
+    if not annotations:
+        # Nothing to override with: Streamlit can only grey out a whole selectbox,
+        # not a single option, so the box itself carries the message.
+        st.sidebar.selectbox(
+            "Override starting clusters",
+            [_NO_ANNOTATION_LABEL],
+            disabled=True,
+            help=help_text,
+        )
+        return None
+    choice = st.sidebar.selectbox(
+        "Override starting clusters",
+        [_LEIDEN_START_LABEL, *annotations],
+        format_func=_fmt,
+        key="cfg_start",
+        help=help_text,
+    )
+    return None if choice == _LEIDEN_START_LABEL else str(choice)
+
+
+def _linkage_method_row(lock: dict | None) -> str:
+    """Sidebar picker for the agglomeration linkage, disabled and pinned to the
+    recorded value once the output folder holds runs."""
+
+    def _fmt(method: str) -> str:
+        return _LINKAGE_LABELS.get(str(method), str(method))
+
+    if lock is not None and lock["linkage_method"]:
+        return str(
+            st.sidebar.selectbox(
+                "Linkage method",
+                [lock["linkage_method"]],
+                format_func=_fmt,
+                disabled=True,
+                help=_LOCKED_HELP,
+            )
+        )
+    return str(
+        st.sidebar.selectbox(
+            "Linkage method",
+            LINKAGE_METHODS,
+            format_func=_fmt,
+            key="cfg_linkage",
+            help="Linkage for the agglomeration tree over the start clusters. "
+            "'average' (UPGMA) peels small tight groups off a dominant cell type; "
+            "'ward' carries a size term and tends to produce balanced cell types.",
+        )
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Dataset validation (the checks behind `spatialaim validate`, reused as-is)
+# --------------------------------------------------------------------------- #
+
+
+@st.cache_data(show_spinner="Validating dataset pair…")
+def _validate_pair(sc_path_str: str, st_path_str: str) -> "PairFindings":
+    """Findings for the selected sc/ST pair, from ``spatialaim.data.validate``.
+
+    Cached per path pair: the checks read both count matrices, so they run once
+    per selection rather than on every rerun.
+    """
+    from spatialaim.data.validate import check_pair
+
+    return check_pair(Path(sc_path_str), Path(st_path_str))
+
+
+def _subject_heading(key: str) -> str:
+    kind, _, name = key.partition(":")
+    return {
+        "sc": f"scRNA reference — {name}",
+        "st": f"ST slice — {name}",
+    }.get(kind, "Pair (shared genes)")
+
+
+@st.dialog("Dataset validation", width="large")
+def _validation_dialog(findings: "PairFindings") -> None:
+    """Modal listing what the validators found. Purely informative — closing it
+    leaves the pair selected and the run configurable."""
+    if findings.errors:
+        st.markdown(
+            "The selected pair violates the SpatialAIM input contract. You can continue, "
+            "but the sweep is likely to fail or to produce meaningless results."
+        )
+    else:
+        st.markdown(
+            "The selected pair is usable, but the checks flagged the following."
+        )
+
+    for subject in findings.subjects:
+        if not (subject.errors or subject.warns):
+            continue
+        kind = subject.key.partition(":")[0]
+        st.markdown(f"**{_subject_heading(subject.key)}**")
+        for msg in subject.errors:
+            st.error(msg.removeprefix(f"{kind}: "), icon="❌")
+        for msg in subject.warns:
+            st.warning(msg.removeprefix(f"{kind}: "), icon="⚠️")
+
+    st.caption(
+        "Same checks as `spatialaim validate --scdata <sc.h5ad> --stdata <st.h5ad>`."
+    )
+    if st.button("Continue", type="primary", key="validation_close"):
+        st.rerun()
+
+
+def _reopen_validation() -> None:
+    st.session_state["_validation_reopen"] = True
+
+
+def _request_data_help() -> None:
+    st.session_state["_show_data_help"] = True
+
+
+@st.dialog("What SpatialAIM expects as input", width="large")
+def _data_requirements_dialog() -> None:
+    """Reference card for the two input files and the pair they form.
+
+    States the contract the validators enforce - keep the two in step when a
+    check in ``spatialaim.data.validate`` changes.
+    """
+    st.markdown(
+        "SpatialAIM maps **scRNA-seq reference data** onto **high-resolution spatial transcriptomics data (e.g. MERFISH / Xenium / seqFISH / osmFISH)**. "
+        "Both are expected as `.h5ad` (AnnData) files holding **raw counts**."
+    )
+
+    st.markdown("""
+| | scRNA reference | ST slice |
+|---|---|---|
+| **`X`** | raw counts, cells × genes | raw counts, "cells" × genes |
+| **`var_names`** | gene symbols, **UPPERCASE** and unique | gene symbols, **UPPERCASE** and unique |
+| additional **`obs`** | annotation columns optional | - |
+| **`obsm["spatial"]`** | - | `(n_spots, 2)` x/y coordinates |
+""")
+
+    st.markdown(
+        "As a pair genes are matched **by name**, so both files must use the same "
+        "symbol convention — the uppercase rule is what makes the intersection "
+        "work.\n"
+    )
+
+    st.markdown("**Annotations are optional**")
+    st.markdown(
+        "In default settings SpatialAIM does not need one — it over-clusters the reference itself. An scRNA `obs` "
+        "column with cell types can still be chosen under *Override starting "
+        "clusters* to build the tree over that annotation instead."
+    )
+
+    if st.button("Got it", key="data_help_close"):
+        st.rerun()
+
+
+def _validation_row(sc_path: Path, st_path: Path, *, allow_dialog: bool = True) -> None:
+    """Validate the selected pair and report the verdict above the step-2 divider.
+
+    Clean pairs get a one-line tick; anything else opens the modal once per pair
+    (re-openable via *Details*). Findings never block: the user closes the modal
+    and configures the run as before. ``allow_dialog=False`` keeps the status line
+    but suppresses the modal for this rerun, when another dialog already owns it.
+    """
+    key = f"{sc_path}||{st_path}"
+    try:
+        findings = _validate_pair(str(sc_path), str(st_path))
+    except Exception as exc:  # noqa: BLE001 - a failed check must not kill the app
+        st.sidebar.caption(f"⚠️ Could not validate the dataset pair: {exc}")
+        return
+
+    if findings.ok:
+        st.sidebar.caption("✅ Dataset pair matches requirements")
+        return
+
+    n_err, n_warn = len(findings.errors), len(findings.warns)
+    counts = [f"{n_err} error(s)"] if n_err else []
+    counts += [f"{n_warn} warning(s)"] if n_warn else []
+    col_txt, col_btn = st.sidebar.columns([3, 1], vertical_alignment="center")
+    col_txt.caption(f"{'❌' if n_err else '⚠️'} Validation: {', '.join(counts)}")
+    col_btn.button(
+        "Details",
+        key="validation_details",
+        on_click=_reopen_validation,
+        width="stretch",
+    )
+
+    # Auto-open once per pair; afterwards only on demand.
+    seen = st.session_state.get("_validation_seen")
+    wanted = st.session_state.pop("_validation_reopen", False) or seen != key
+    if wanted and allow_dialog:
+        st.session_state["_validation_seen"] = key
+        _validation_dialog(findings)
+
+
+def _sidebar() -> argparse.Namespace | None:
+    """Render the sidebar (data paths, start clusters, linkage, method selection +
+    run queue).
+
+    Returns the run settings once the paths are valid, else ``None``.
+    """
+    st.sidebar.title("SpatialAIM GUI")
+
+    # -- step 1: data paths ----------------------------------------------
+    # Centre the icon inside the (stretched) Browse buttons; Streamlit left-aligns
+    # button labels by default. The Clear button sits on the step-1 header row and
+    # is shrunk to a compact secondary control.
+    st.sidebar.markdown(
+        "<style>"
+        "div[class*='st-key-browse_'] button{"
+        "display:flex;justify-content:center;align-items:center;padding:0;}"
+        "div[class*='st-key-browse_'] button>div{"
+        "display:flex;justify-content:center;align-items:center;width:100%;}"
+        "div[class*='st-key-browse_'] button p{margin:0;text-align:center;}"
+        # Info + Clear share one container so nothing (no column gap, no leftover
+        # column width) can wedge itself between them: a right-aligned flex row
+        # whose items keep their natural width.
+        "div[class*='st-key-hdr_btns']{display:flex;flex-direction:row;"
+        "justify-content:flex-end;align-items:center;gap:0.25rem;width:100%;}"
+        "div[class*='st-key-hdr_btns']>div{width:auto;flex:0 0 auto;}"
+        "div[class*='st-key-hdr_btns'] button{"
+        "padding:0.1rem 0.4rem;min-height:0;width:auto;white-space:nowrap;}"
+        "div[class*='st-key-hdr_btns'] button p{font-size:0.75rem;margin:0;}"
+        # Group label for the method list: matches a Streamlit widget label
+        # (0.875rem) so it lines up with 'Linkage method' above it.
+        ".spatialaim-group-label{font-size:0.875rem;line-height:1.6;margin-bottom:0.25rem;}"
+        # White (theme background) like the inputs, not the grey sidebar surface.
+        "div[class*='st-key-methods_box']{padding:0.5rem 0.75rem;"
+        "background-color:var(--background-color,#fff);}"
+        "div[class*='st-key-methods_box'] label{font-size:0.875rem;}"
+        # Even rhythm inside the box: the container gap is 0, so every row's
+        # spacing comes from these margins alone.
+        "div[class*='st-key-methods_box'] label{padding:0.15rem 0;}"
+        ".spatialaim-mapper-group{font-size:0.7rem;font-weight:600;letter-spacing:0.04em;"
+        "text-transform:uppercase;opacity:0.55;margin:0.5rem 0 1rem;}"
+        ".spatialaim-mapper-group.spatialaim-first{margin-top:0;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+    col_hdr, col_btns = st.sidebar.columns([3, 2], vertical_alignment="center")
+    col_hdr.subheader("1. Select data")
+    with col_btns:
+        btns = st.container(key="hdr_btns")
+    btns.button(
+        "Info",
+        key="info_btn",
+        on_click=_request_data_help,
+        help="Expected input data",
+    )
+    btns.button(
+        "Clear",
+        key="clear_btn",
+        on_click=_clear_session,
+        help="Reset all inputs, the method selection and the run queue. "
+        "Computed results on disk are kept.",
+    )
+    # Opening the requirements card takes precedence over the validation modal:
+    # Streamlit allows one dialog per rerun.
+    show_data_help = st.session_state.pop("_show_data_help", False)
+    if show_data_help:
+        _data_requirements_dialog()
+    st.session_state.setdefault("cfg_sc", "")
+    st.session_state.setdefault("cfg_st", "")
+    st.session_state.setdefault("cfg_out", "")
+    st.session_state.setdefault("cfg_linkage", LINKAGE_METHODS[0])
+
+    def _path_row(label: str, key: str, kind: str, browse_key: str) -> str:
+        # Text field with an icon-only Browse button to its right (bottom-aligned
+        # so it lines up with the input, not the label).
+        col_in, col_btn = st.sidebar.columns([5, 1], vertical_alignment="bottom")
+        val = col_in.text_input(label, key=key)
+        col_btn.button(
+            "📁",
+            key=browse_key,
+            on_click=_browse,
+            args=(kind, key),
+            help="Browse…",
+            width="stretch",
+        )
+        return val
+
+    sc_str = _path_row("scRNA .h5ad path", "cfg_sc", "file", "browse_sc")
+    st_str = _path_row("ST .h5ad path", "cfg_st", "file", "browse_st")
+    out_str = _path_row("Output directory", "cfg_out", "dir", "browse_out")
+    if st.session_state.get("_browse_error"):
+        st.sidebar.warning(st.session_state.pop("_browse_error"))
+
+    sc_path = Path(sc_str.strip()) if sc_str.strip() else None
+    st_path = Path(st_str.strip()) if st_str.strip() else None
+    out_path = Path(out_str.strip()) if out_str.strip() else None
+
+    incomplete = (
+        sc_path is None
+        or not sc_path.is_file()
+        or st_path is None
+        or not st_path.is_file()
+        or out_path is None
+    )
+
+    # Both paths point at real files: validate the pair before anything is
+    # configured, so contract violations surface here and not deep in a sweep.
+    if not incomplete:
+        _validation_row(sc_path, st_path, allow_dialog=not show_data_help)
+
+    # -- step 2: scaffold knobs + methods ---------------------------------
+    # The header stays visible while step 1 is incomplete; its controls need the
+    # paths (start clusters read the scRNA obs, the rest lock against the output
+    # folder), so they are replaced by a hint until then.
+    st.sidebar.divider()
+    st.sidebar.subheader("2. Configure method")
+    if incomplete:
+        st.sidebar.caption("Select data first.")
+        return None
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    # Settings the scaffold is built from lock once this folder holds runs.
+    lock = _run_lock(out_str)
+    start_from_annotation = _start_cluster_row(sc_str, lock)
+
+    linkage_method = _linkage_method_row(lock)
+
+    settings = argparse.Namespace(
+        scdata=sc_path,
+        stdata=st_path,
+        output_dir=out_path,
+        k_min=_DEFAULT_K_MIN,
+        k_max=_DEFAULT_K_MAX,
+        k_step=_DEFAULT_K_STEP,
+        linkage_method=str(linkage_method),
+        start_from_annotation=start_from_annotation,
+    )
+
+    # methods: every choice stays listed; state decides whether its row is live
+    runs: dict[str, compute.MapperRun] = st.session_state.setdefault("runs", {})
+    queue: list[str] = st.session_state.setdefault("queue", [])
+    computed = data_access.list_mappers(out_path)
+    running_mapper = next((m for m, r in runs.items() if r.is_running()), None)
+
+    # A method that is computed, running or queued is locked on: its row shows
+    # ticked and disabled instead of leaving the list.
+    taken = set(computed) | set(queue)
+    if running_mapper:
+        taken.add(running_mapper)
+    selectable = set(_selectable_methods())
+
+    st.sidebar.markdown(
+        "<div class='spatialaim-group-label'>Select mapping methods to run "
+        "(1 or more)</div>",
+        unsafe_allow_html=True,
+    )
+    from spatialaim.config import _INPROCESS_METHODS
+
+    # nearest_centroid is the default mapper, so it starts ticked; a manual
+    # untick sticks (setdefault only fills the key in on a fresh session).
+    st.session_state.setdefault("add_nearest_centroid", True)
+    box = st.sidebar.container(border=True, gap=0, key="methods_box")
+    selected = []
+    heading_shown: set[str] = set()
+    for m in MAPPING_CHOICES:
+        heading = "Baseline mappers" if m in _INPROCESS_METHODS else "Reference mappers"
+        if heading not in heading_shown:
+            first = "" if heading_shown else " spatialaim-first"
+            heading_shown.add(heading)
+            box.markdown(
+                f"<div class='spatialaim-mapper-group{first}'>{heading}</div>",
+                unsafe_allow_html=True,
+            )
+        label = _MAPPER_LABELS.get(m, m)
+        if m in taken:
+            # A running mapper already has config.yaml on disk (so it is in
+            # `computed`); don't call it done until its thread finishes.
+            if m == running_mapper:
+                state = "⏳ running"
+            elif m in computed:
+                state = "computed"
+            else:
+                state = "🕒 queued"
+            # Own key namespace: `add_<m>` may already hold the user's tick.
+            box.checkbox(
+                f"{label} — {state}", value=True, disabled=True, key=f"done_{m}"
+            )
+        elif m in selectable:
+            if box.checkbox(label, key=f"add_{m}"):
+                selected.append(m)
+        else:
+            box.checkbox(
+                f"{label} — conda env not found", disabled=True, key=f"add_{m}"
+            )
+    st.sidebar.divider()
+    if st.sidebar.button(
+        "Run",
+        disabled=not selected,
+        width="stretch",
+        help="The selected methods compute one after another.",
+    ):
+        for m in selected:
+            if m not in queue:
+                queue.append(m)
+        # Flag a pending run so the empty-state prompt never flashes before the
+        # first tab appears; cleared once any tab renders. No st.rerun() here:
+        # letting main() continue in this same run starts the method and renders
+        # its progress tab immediately, so the idle "select methods" prompt is
+        # replaced in place instead of lingering until the next run.
+        st.session_state["_run_requested"] = True
+
+    # Surface failures.
+    for m, r in list(runs.items()):
+        if r.error and not r.is_running() and m not in computed:
+            st.sidebar.error(f"'{m}' failed — see terminal.")
+
+    return settings
+
+
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
+# Session-state key of the tab bar; holds the active tab's label.
+_TABS_KEY = "result_tabs"
+
+
+def _tab_change_callback(
+    output_dir: Path, tab_mappers: list[str], ks_all: list[int]
+) -> Callable[[], None]:
+    """``on_change`` for the tab bar: opening a mapper's tab moves the shared K
+    slider onto that mapper's best overall K, so each tab lands on the K its own
+    sweep proposes instead of on whatever the previous tab was showing.
+
+    Runs as a widget callback, i.e. before the script body re-instantiates the
+    slider, so writing its session-state key is allowed. Nothing happens on the
+    reference and Compare tabs, or while a mapper has no scored K yet — the K on
+    show then simply carries over.
+    """
+
+    def _on_change() -> None:
+        mapper = st.session_state.get(_TABS_KEY)
+        if mapper not in tab_mappers:
+            return
+        k = _best_overall_k(data_access.run_root(output_dir, str(mapper)))
+        if k is not None and k in ks_all:
+            _set_ctrl_k(ks_all.index(k))
+
+    return _on_change
+
+
+def _render_body(
+    settings: argparse.Namespace,
+    runs: dict,
+    queue: list,
+    computed: list[str],
+    running_mapper: str | None,
+    active: bool,
+    tab_mappers: list[str],
+    comparable: list[str],
+) -> None:
+    """Render the main content area (idle prompt, computing notice, or the tab
+    set). Called inside a single ``st.empty()`` placeholder so it is replaced
+    atomically each run."""
+    if not tab_mappers:
+        # Render EXACTLY ONE element here. The polling loop reruns via st.rerun(),
+        # which does not clear stale elements, so if the idle branch emitted more
+        # elements than the tabs branch, the extra ones (e.g. this prompt) would
+        # linger below the tabs for the whole computation. A single st.info is a
+        # different element type than st.tabs, so it is fully replaced when the
+        # first tab appears.
+        if active or st.session_state.get("_run_requested"):
+            st.info(
+                "### SpatialAIM results explorer\nComputing… tabs will appear as methods start."
+            )
+        else:
+            st.info(
+                "### SpatialAIM results explorer\n"
+                "Select one or more methods in the sidebar and click **Run** to begin."
+            )
+        return
+
+    # Tabs exist now — the pending-run flag has done its job.
+    st.session_state.pop("_run_requested", None)
+    # Shared display controls (K + shared-gene-UMAP toggle) live above the tab
+    # bar and drive every tab at once. K options are the finished methods' common
+    # set (all sweeps share the reference, so it matches).
+    finished = [m for m in tab_mappers if m in computed and m != running_mapper]
+    ks_all = sorted(
+        {
+            kk
+            for m in finished
+            for kk in data_access.list_ks(data_access.run_root(settings.output_dir, m))
+        }
+    )
+    ctrl = _shared_controls(ks_all) if ks_all else None
+
+    # Tab order: the "Single-cell reference" tab (clustering-side,
+    # mapper-independent) first, then a divider, then the per-method tabs, then
+    # the Compare tab (>=2 finished methods). The reference tab appears once any
+    # method has finished.
+    ref_available = ctrl is not None and len(finished) >= 1
+    compare_available = len(comparable) >= 2 and ctrl is not None
+
+    if ref_available:
+        # st.tabs has no divider, so draw a vertical rule on the right edge of the
+        # first tab (the reference tab) to set it apart from the methods.
+        st.markdown(
+            "<style>"
+            'div[data-baseweb="tab-list"] button[role="tab"]:first-of-type{'
+            "border-right:2px solid rgba(140,140,140,0.35);"
+            "margin-right:0.75rem;padding-right:1rem;}"
+            "</style>",
+            unsafe_allow_html=True,
+        )
+
+    labels: list[str] = []
+    if ref_available:
+        labels.append("Single-cell reference")
+    labels += list(tab_mappers)
+    if compare_available:
+        labels.append("⇄ Compare")
+
+    tabs = st.tabs(
+        labels,
+        key=_TABS_KEY,
+        on_change=_tab_change_callback(settings.output_dir, tab_mappers, ks_all),
+    )
+    idx = 0
+    if ref_available:
+        with tabs[idx]:
+            _reference_tab(finished, settings, ctrl)
+        idx += 1
+    for mapper in tab_mappers:
+        with tabs[idx]:
+            _mapper_tab(mapper, settings, runs, queue, ctrl, ks_all)
+        idx += 1
+    if compare_available:
+        with tabs[idx]:
+            _compare_tab(comparable, settings, ctrl)
+
+
+def main() -> None:
+    st.set_page_config(page_title="SpatialAIM GUI", layout="wide")
+    settings = _sidebar()
+
+    if settings is None:
+        st.title("SpatialAIM results explorer")
+        st.info(
+            "Set the scRNA path (.h5ad format), ST path (.h5ad format), and "
+            "output directory in the sidebar to begin."
+        )
+        return
+
+    runs: dict[str, compute.MapperRun] = st.session_state.setdefault("runs", {})
+    queue: list[str] = st.session_state.setdefault("queue", [])
+
+    # Sequential execution: start the next queued mapper when none is running.
+    running = any(r.is_running() for r in runs.values())
+    just_started = False
+    if not running and queue:
+        nxt = queue.pop(0)
+        runs[nxt] = compute.MapperRun(
+            nxt,
+            settings.scdata,
+            settings.stdata,
+            settings.output_dir,
+            settings.k_min,
+            settings.k_max,
+            settings.k_step,
+            linkage_method=settings.linkage_method,
+            start_from_annotation=settings.start_from_annotation,
+        ).start()
+        running = True
+        just_started = True
+
+    computed = data_access.list_mappers(settings.output_dir)
+    running_mapper = next((m for m, r in runs.items() if r.is_running()), None)
+    active = running_mapper is not None or bool(queue)
+    # A tab per method that is computed, running, or queued (MAPPING_CHOICES order).
+    tab_set = set(computed) | set(runs.keys()) | set(queue)
+    tab_mappers = [m for m in MAPPING_CHOICES if m in tab_set]
+    # Comparable = finished on disk (exclude the one still running).
+    comparable = [m for m in tab_mappers if m in computed and m != running_mapper]
+
+    # Render the whole body into one st.empty() placeholder. Because st.rerun()
+    # (used by the polling loop below) does NOT clear stale elements, an st.info
+    # rendered on the idle run would otherwise linger on screen for the entire
+    # computation. A single placeholder is re-filled atomically each run, so the
+    # idle prompt is replaced the instant the first tab renders.
+    with st.empty().container():
+        _render_body(
+            settings,
+            runs,
+            queue,
+            computed,
+            running_mapper,
+            active,
+            tab_mappers,
+            comparable,
+        )
+
+    # While work is pending/running, refresh so progress advances and new tabs
+    # flip from "waiting" to results.
+    if just_started:
+        # Finish this run immediately (no sleep) so Streamlit clears the now-stale
+        # idle "select methods" prompt right away, instead of leaving it on screen
+        # for the polling interval below. The next run does the actual polling.
+        st.rerun()
+    elif queue or any(r.is_running() for r in runs.values()):
+        time.sleep(1.5)
+        st.rerun()
+
+
+# Streamlit executes this module top-to-bottom on every rerun.
+main()

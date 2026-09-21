@@ -18,7 +18,7 @@ jobs:
           python-version: "3.13"
       - name: Install lint tools
         run: pip install black mypy types-PyYAML
-      - name: Install package without deps so `aim` is importable for mypy
+      - name: Install package without deps so `spatialaim` is importable for mypy
         run: pip install -e . --no-deps
       - name: black
         run: black --check .
@@ -58,8 +58,8 @@ jobs:
           name: dist
           path: dist/*
 
-  integration-aim:
-    # End-to-end AIM sweep on the sample dataset in aim_env.
+  integration-spatialaim:
+    # End-to-end SpatialAIM sweep on the sample dataset in spatialaim_env.
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -70,30 +70,30 @@ jobs:
           fetch-depth: 0
       - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4
         with:
-          activate-environment: aim_env
+          activate-environment: spatialaim_env
           environment-file: environment.yml
           auto-activate-base: false
           miniforge-version: latest
           cache-environment: true
       - name: Install package (no deps; env already has them)
         run: pip install -e . --no-deps
-      - name: aim run — single pair (nearest_centroid)
+      - name: spatialaim run — single pair (nearest_centroid)
         run: |
-          aim run \
+          spatialaim run \
             --scdata     sample_dataset/scRNA/sample_sc.h5ad \
             --stdata     sample_dataset/ST/sample_st.h5ad \
             --output_dir sample_output/novel/nearest_centroid \
             --mapping    nearest_centroid --leiden_resolution 3.0
-      - name: aim run — single pair (wann)
+      - name: spatialaim run — single pair (wann)
         run: |
-          aim run \
+          spatialaim run \
             --scdata     sample_dataset/scRNA/sample_sc.h5ad \
             --stdata     sample_dataset/ST/sample_st.h5ad \
             --output_dir sample_output/novel/wann \
             --mapping    wann --leiden_resolution 3.0
-      - name: aim run — batch (all pairs)
+      - name: spatialaim run — batch (all pairs)
         run: |
-          aim run \
+          spatialaim run \
             --pairs_csv  sample_dataset/pairs.csv \
             --sc_dir     sample_dataset/scRNA \
             --st_dir     sample_dataset/ST \
@@ -103,7 +103,7 @@ jobs:
         run: pytest -m slow
 
   integration-reference:
-    # Reference-aligner path: aim_env orchestrates the sweep (single + batch) with
+    # Reference-aligner path: spatialaim_env orchestrates the sweep (single + batch) with
     # `--mapping tangram`, so ReferenceMapper drives an AlignerWorker and
     # tangram_env runs the aligner via `conda run`, once per K.
     runs-on: ubuntu-latest
@@ -116,26 +116,26 @@ jobs:
           fetch-depth: 0
       - uses: conda-incubator/setup-miniconda@8ee1f361103df19b6f8c8655fd3967a8ecb162d5 # v4
         with:
-          activate-environment: aim_env
+          activate-environment: spatialaim_env
           environment-file: environment.yml
           auto-activate-base: false
           miniforge-version: latest
           cache-environment: true
       - name: Create tangram_env
-        run: conda env create -f src/aim/reference_aligners/environment_tangram.yml
+        run: conda env create -f src/spatialaim/reference_aligners/environment_tangram.yml
       - name: Install package into both envs (no deps)
         run: |
           pip install -e . --no-deps
           conda run -n tangram_env pip install -e . --no-deps
-      - name: aim run — single pair (tangram)
+      - name: spatialaim run — single pair (tangram)
         run: |
-          aim run --mapping tangram \
+          spatialaim run --mapping tangram \
             --scdata     sample_dataset/scRNA/sample_sc.h5ad \
             --stdata     sample_dataset/ST/sample_st.h5ad \
             --output_dir sample_output/tangram/sample
-      - name: aim run — batch (tangram)
+      - name: spatialaim run — batch (tangram)
         run: |
-          aim run --mapping tangram \
+          spatialaim run --mapping tangram \
             --pairs_csv  sample_dataset/pairs.csv \
             --sc_dir     sample_dataset/scRNA \
             --st_dir     sample_dataset/ST \

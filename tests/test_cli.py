@@ -1,4 +1,4 @@
-"""Tests for the unified ``aim`` CLI dispatcher.
+"""Tests for the unified ``spatialaim`` CLI dispatcher.
 
 Cover argument parsing, subcommand wiring, and exit codes only (no
 torch/scanpy/squidpy). The heavy handlers (the sweep / aligner / GUI runs) are
@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from aim import cli
+from spatialaim import cli
 
 
 def test_build_parser_lists_all_subcommands():
@@ -20,13 +20,13 @@ def test_build_parser_lists_all_subcommands():
         for a in parser._actions
         if hasattr(a, "choices") and a.choices and "run" in a.choices
     ]
-    assert subactions, "no subparsers found on the aim parser"
+    assert subactions, "no subparsers found on the spatialaim parser"
     choices = set(subactions[0].choices)
     assert {"run", "gui", "validate"} <= choices
-    # `aim map-annotation` was removed: `aim run --start_from_annotation` is the
+    # `spatialaim map-annotation` was removed: `spatialaim run --start_from_annotation` is the
     # annotation path now.
     assert "map-annotation" not in choices
-    # `aim data validate` became the top-level `aim validate`; the `data` group is gone.
+    # `spatialaim data validate` became the top-level `spatialaim validate`; the `data` group is gone.
     assert "data" not in choices
 
 
@@ -41,7 +41,7 @@ def test_version_flag_exits_zero(capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main(["--version"])
     assert exc.value.code == 0
-    assert "aim" in capsys.readouterr().out
+    assert "spatialaim" in capsys.readouterr().out
 
 
 def test_help_exits_zero():
@@ -64,12 +64,12 @@ def test_run_without_paths_errors():
 
 
 def test_run_linkage_method_choices():
-    from aim.aim_config import AIMConfig, LINKAGE_METHODS
+    from spatialaim.config import SpatialAIMConfig, LINKAGE_METHODS
 
     parser = cli._build_parser()
     base = ["run", "--scdata", "a.h5ad", "--stdata", "b.h5ad", "--output_dir", "o"]
-    # Default matches AIMConfig's, and every registered linkage is accepted.
-    assert parser.parse_args(base).linkage_method == AIMConfig().linkage_method
+    # Default matches SpatialAIMConfig's, and every registered linkage is accepted.
+    assert parser.parse_args(base).linkage_method == SpatialAIMConfig().linkage_method
     for method in LINKAGE_METHODS:
         args = parser.parse_args(base + ["--linkage_method", method])
         assert args.linkage_method == method
@@ -80,20 +80,20 @@ def test_run_linkage_method_choices():
 
 
 def test_run_start_from_annotation_defaults_to_none():
-    from aim.aim_config import AIMConfig
+    from spatialaim.config import SpatialAIMConfig
 
     parser = cli._build_parser()
     base = ["run", "--scdata", "a.h5ad", "--stdata", "b.h5ad", "--output_dir", "o"]
-    # Default = Leiden over-clustering, matching AIMConfig's.
+    # Default = Leiden over-clustering, matching SpatialAIMConfig's.
     assert parser.parse_args(base).start_from_annotation is None
-    assert AIMConfig().start_from_annotation is None
+    assert SpatialAIMConfig().start_from_annotation is None
     # Any obs column name is accepted verbatim (validated against the h5ad at run time).
     args = parser.parse_args(base + ["--start_from_annotation", "cellType"])
     assert args.start_from_annotation == "cellType"
 
 
 def test_run_accepts_every_mapper():
-    from aim.aim_config import MAPPING_CHOICES
+    from spatialaim.config import MAPPING_CHOICES
 
     parser = cli._build_parser()
     base = ["run", "--scdata", "a.h5ad", "--stdata", "b.h5ad", "--output_dir", "o"]

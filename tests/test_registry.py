@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from aim.reference_aligners import registry
+from spatialaim.reference_aligners import registry
 
 
 def test_reference_aligners_registered_and_consistent():

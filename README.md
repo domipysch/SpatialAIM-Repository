@@ -1,4 +1,4 @@
-# AIM — Annotation-Independent Mapping
+# SpatialAIM — Annotation-Independent Mapping
 
 **Quick install**
 
@@ -6,12 +6,12 @@
 # Install from PyPi
 pip install spatial-aim
 # Run GUI
-aim gui
+spatialaim gui
 ```
 
 ---
 
-**AIM** maps an **unannotated** scRNA-seq reference (scRNA) onto single-cell-resolution spatial transcriptomics (ST) in a **GUI** or **CLI**. For a scRNA/ST pair it:
+**SpatialAIM** maps an **unannotated** scRNA-seq reference (scRNA) onto single-cell-resolution spatial transcriptomics (ST) in a **GUI** or **CLI**. For a scRNA/ST pair it:
 
 1. **Over-clusters** the scRNA reference once with Leiden into `L` start clusters.
 2. Builds **one agglomeration tree** over those start clusters.
@@ -29,12 +29,12 @@ If you want to replace the Leiden overclustering from Step 1 with your own annot
 
 ## Outline
 
-- [Why AIM?](#why-aim)
+- [Why SpatialAIM?](#why-spatialaim)
 - [Input data format](#input-data-format)
 - [For users](#for-users)
 - [For developers](#for-developers)
 
-## Why AIM?
+## Why SpatialAIM?
 
 Conventional mapping methods blindly map a **pre-annotated** scRNA reference onto spots, even if there is not enough signal in the spatial data to reliably distinguish between them.
 The hierarchical cell type clustering is based on both the scRNA and the ST data at hand. The user can find a cell type granularity that can be mapped reliably.
@@ -43,7 +43,7 @@ The hierarchical cell type clustering is based on both the scRNA and the ST data
 
 ## Input data format
 
-To run AIM, you need a pair of a scRNA dataset and a ST dataset, both as raw counts in `.h5ad` format.
+To run SpatialAIM, you need a pair of a scRNA dataset and a ST dataset, both as raw counts in `.h5ad` format.
 
 - **scRNA `<Name>.h5ad`**: `X` = raw counts (cells × genes);  `var_names` = **uppercase** gene symbols.
 - **ST `<Name>.h5ad`**: `X` = raw counts (spots × genes);  `var_names` = **uppercase** gene symbols; `obsm["spatial"]` = (x, y)-coordinates of the spots: (n_spots × 2).
@@ -54,7 +54,7 @@ Just have the two `.h5ad` files available and you are good to go.
 
 ### Batch processing
 
-AIM also supports batch processing of multiple pairs.
+SpatialAIM also supports batch processing of multiple pairs.
 Organise the data relationally the following way so one scRNA reference can be reused  across many ST slices:
 
 ```
@@ -68,46 +68,46 @@ DATA/
 └── pairs.csv              # links scRNA ↔ ST: PairID, scName, stName, …
 ```
 
-See [`sample_dataset/`](sample_dataset) for a minimal example, and validate your own layout with [`aim validate`](#validate-a-dataset-pair-aim-validate).
+See [`sample_dataset/`](sample_dataset) for a minimal example, and validate your own layout with [`spatialaim validate`](#validate-a-dataset-pair-spatialaim-validate).
 
 ## For users
 
 ### Installation
 
-AIM is installable from PyPI:
+SpatialAIM is installable from PyPI:
 
 ```bash
 pip install spatial-aim
 ```
 
-This installs one command, `aim`, with subcommands (`aim --help`).
-You can now already run `aim` with the baseline mappers.
+This installs one command, `spatialaim`, with subcommands (`spatialaim --help`).
+You can now already run `spatialaim` with the baseline mappers.
 
-If you want to be able to select one of the reference aligners within AIM, you need `conda` installed on your machine.
+If you want to be able to select one of the reference aligners within SpatialAIM, you need `conda` installed on your machine.
 Please install the corresponding conda environments on your computer.
 
 | Method  | Environment   | Command                                                                                                                                                                              |
 | ------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Tangram | `tangram_env` | `conda env create -f https://raw.githubusercontent.com/domipysch/AIM/main/src/aim/reference_aligners/environment_tangram.yml`                                                        |
-| TACCO   | `tacco_env`   | `conda env create -f https://raw.githubusercontent.com/domipysch/AIM/main/src/aim/reference_aligners/environment_tacco.yml`                                                          |
-| DOT     | `dot_env`     | `conda env create -f https://raw.githubusercontent.com/domipysch/AIM/main/src/aim/reference_aligners/environment_dot.yml` then `Rscript -e "remotes::install_github('saezlab/DOT')"` |
+| Tangram | `tangram_env` | `conda env create -f https://raw.githubusercontent.com/domipysch/SpatialAIM-Repository/main/src/spatialaim/reference_aligners/environment_tangram.yml`                                                        |
+| TACCO   | `tacco_env`   | `conda env create -f https://raw.githubusercontent.com/domipysch/SpatialAIM-Repository/main/src/spatialaim/reference_aligners/environment_tacco.yml`                                                          |
+| DOT     | `dot_env`     | `conda env create -f https://raw.githubusercontent.com/domipysch/SpatialAIM-Repository/main/src/spatialaim/reference_aligners/environment_dot.yml` then `Rscript -e "remotes::install_github('saezlab/DOT')"` |
 
-> For AIM to use the environments, please make sure AIM can find your conda executable.
+> For SpatialAIM to use the environments, please make sure SpatialAIM can find your conda executable.
 > Either set the environment variable `CONDA_EXE` or add your path to your conda installation to `PATH`.
 > Make sure `exe = os.environ.get("CONDA_EXE") or shutil.which("conda")` returns the path to your conda.
 
-### Validate a dataset pair (`aim validate`)
+### Validate a dataset pair (`spatialaim validate`)
 
 Check whether your data meets the main requirements.
 
 ```bash
-aim validate --scdata path/to/sc.h5ad --stdata path/to/st.h5ad
+spatialaim validate --scdata path/to/sc.h5ad --stdata path/to/st.h5ad
 ```
 
 or for every pair of a `pairs.csv` laid out as in [Batch Processing](#batch-processing):
 
 ```bash
-aim validate --pairs_csv path/to/DATA/pairs.csv
+spatialaim validate --pairs_csv path/to/DATA/pairs.csv
 ```
 
 Validations per dataset:
@@ -124,21 +124,21 @@ Validations per dataset:
   - whether any ST spot is left all-zero by it.
 - If an `index.csv` sits next to the `.h5ad` files, its recorded counts and cell-type keys are cross-checked as well.
 
-### Run via GUI (`aim gui`)
+### Run via GUI (`spatialaim gui`)
 
-Interactive [Streamlit](https://streamlit.io) app to run AIM from the browser and interactively browse the results for one scRNA/ST pair without any .
+Interactive [Streamlit](https://streamlit.io) app to run SpatialAIM from the browser and interactively browse the results for one scRNA/ST pair without any .
 
 ```bash
-aim gui [--server_port 8501]
+spatialaim gui [--server_port 8501]
 ```
 
 Open the printed URL (default http://localhost:8501), set the inputs, pick one or multiple mapper(s), and click **Run**.
-As soon as both `.h5ad` paths are set, the GUI runs the same checks as [`aim validate`](#validate-a-dataset-pair-aim-validate) on that pair: a clean pair is confirmed with a tick in the sidebar, any error or warning is shown in a dialog you can close to continue anyway.
+As soon as both `.h5ad` paths are set, the GUI runs the same checks as [`spatialaim validate`](#validate-a-dataset-pair-spatialaim-validate) on that pair: a clean pair is confirmed with a tick in the sidebar, any error or warning is shown in a dialog you can close to continue anyway.
 The GUI writes each mapper's sweep to  `<output_dir>/<mapper>/`. The results using each mapper are visualized in different tabs. When having run multiple mappers, also a "Compare" tab appears.
 
-### Run via CLI (`aim run`)
+### Run via CLI (`spatialaim run`)
 
-Run AIM via CLI on a single pair or in batch mode.
+Run SpatialAIM via CLI on a single pair or in batch mode.
 The spot→state mapper is chosen with argument `--mapping`:
 
 - **`nearest_centroid`** (default): Per spot, select the cell state by highest cosine similarity between the state's centroid and the spot's expression. One-hot assignment by default.
@@ -158,7 +158,7 @@ Give such runs their own `--output_dir`: a run root is named after the mapper al
 **Single pair**
 
 ```bash
-aim run --scdata path/to/sc.h5ad \
+spatialaim run --scdata path/to/sc.h5ad \
 		--stdata path/to/st.h5ad \
 		--output_dir path/to/out_dir \
 		[--mapping nearest_centroid|wann|tangram|tacco|dot] \
@@ -172,7 +172,7 @@ aim run --scdata path/to/sc.h5ad \
 **Batch mode (all pairs in `pairs.csv`):**
 
 ```bash
-aim run --pairs_csv path/to/pairs.csv \
+spatialaim run --pairs_csv path/to/pairs.csv \
 		--sc_dir path/to/scRNA \
 		--st_dir path/to/ST \
 		--output_dir path/to/out_dir \
@@ -205,7 +205,7 @@ Each pair is written to `<out_dir>/<PairID>_<scName>__<stName>/`.
 **Sample-dataset example:**
 
 ```bash
-aim run \
+spatialaim run \
 	--scdata     sample_dataset/scRNA/sample_sc.h5ad \
 	--stdata     sample_dataset/ST/sample_st.h5ad \
 	--output_dir sample_output/sample
@@ -215,7 +215,7 @@ aim run \
 
 ### Annotation-based baseline
 
-There is no separate command for it: `aim run --start_from_annotation <obs_column>` covers it.
+There is no separate command for it: `spatialaim run --start_from_annotation <obs_column>` covers it.
 The annotated types become the start clusters, and the sweep's **`K` = number-of-types** level is the baseline.
 
 ## For developers
@@ -227,36 +227,36 @@ This will include everything apart from the reference aligner methods.
 
 ```bash
 conda env create -f environment.yml
-conda activate aim_env
+conda activate spatialaim_env
 
-# Optional: Install the AIM-CLI from local
+# Optional: Install the SpatialAIM-CLI from local
 pip install -e . --no-deps
 ```
 
 #### Environments of reference aligners
 
-If you want to use one of the reference aligners within AIM or standalone, you have to additionally create the following environments. Each reference aligner runs in its own conda environment.
+If you want to use one of the reference aligners within SpatialAIM or standalone, you have to additionally create the following environments. Each reference aligner runs in its own conda environment.
 
-AIM orchestrates them out-of-process via `conda run`, so you need `conda` on `PATH`. The env `.yml` files live in the repo under [`src/aim/reference_aligners/`](https://github.com/domipysch/AIM/tree/main/src/aim/reference_aligners).
+SpatialAIM orchestrates them out-of-process via `conda run`, so you need `conda` on `PATH`. The env `.yml` files live in the repo under [`src/spatialaim/reference_aligners/`](https://github.com/domipysch/SpatialAIM-Repository/tree/main/src/spatialaim/reference_aligners).
 
 | Method  | Environment   | Create                                                                                                                                                                               |
 | ------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Tangram | `tangram_env` | `conda env create -f https://raw.githubusercontent.com/domipysch/AIM/main/src/aim/reference_aligners/environment_tangram.yml`                                                        |
-| TACCO   | `tacco_env`   | `conda env create -f https://raw.githubusercontent.com/domipysch/AIM/main/src/aim/reference_aligners/environment_tacco.yml`                                                          |
-| DOT     | `dot_env`     | `conda env create -f https://raw.githubusercontent.com/domipysch/AIM/main/src/aim/reference_aligners/environment_dot.yml` then `Rscript -e "remotes::install_github('saezlab/DOT')"` |
+| Tangram | `tangram_env` | `conda env create -f https://raw.githubusercontent.com/domipysch/SpatialAIM-Repository/main/src/spatialaim/reference_aligners/environment_tangram.yml`                                                        |
+| TACCO   | `tacco_env`   | `conda env create -f https://raw.githubusercontent.com/domipysch/SpatialAIM-Repository/main/src/spatialaim/reference_aligners/environment_tacco.yml`                                                          |
+| DOT     | `dot_env`     | `conda env create -f https://raw.githubusercontent.com/domipysch/SpatialAIM-Repository/main/src/spatialaim/reference_aligners/environment_dot.yml` then `Rscript -e "remotes::install_github('saezlab/DOT')"` |
 
 
 ### Adding another reference aligner
 
 Reference aligners are pluggable.
 Each runs the same way: a wrapper launched out-of-process in its own conda env.
-The framework learns about it from a **single registry**,[`src/aim/reference_aligners/registry.py`](src/aim/reference_aligners/registry.py).
+The framework learns about it from a **single registry**,[`src/spatialaim/reference_aligners/registry.py`](src/spatialaim/reference_aligners/registry.py).
 
 Adding a reference aligner is three steps:
 
-**1. Add the conda environment file and create it**, e.g. `conda env create -f src/aim/reference_aligners/environment_<name>.yml`.
+**1. Add the conda environment file and create it**, e.g. `conda env create -f src/spatialaim/reference_aligners/environment_<name>.yml`.
 
-**2. Write `src/aim/reference_aligners/run_<name>.py`** satisfying the CLI API:
+**2. Write `src/spatialaim/reference_aligners/run_<name>.py`** satisfying the CLI API:
 
 |            | Contract                                                                                                                                            |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -268,16 +268,16 @@ Invoked with only those four args, the wrapper must reproduce its canonical mapp
 
 **3. Register it**
 
-Add one line to `REFERENCE_ALIGNERS` ([`src/aim/reference_aligners/registry.py`](src/aim/reference_aligners/registry.py)).
+Add one line to `REFERENCE_ALIGNERS` ([`src/spatialaim/reference_aligners/registry.py`](src/spatialaim/reference_aligners/registry.py)).
 
 ```python
-ReferenceAligner("<name>", "<name>_env", "aim.reference_aligners.run_<name>"),
+ReferenceAligner("<name>", "<name>_env", "spatialaim.reference_aligners.run_<name>"),
 ```
 
 It is then selectable everywhere automatically:
 
-- `aim gui` (it will be selectable in the sidebar)
-- `aim run --mapping <name>` (as an AIM reference mapper, one alignment per `K`) — including `--start_from_annotation`, where it maps onto a pre-existing annotation
+- `spatialaim gui` (it will be selectable in the sidebar)
+- `spatialaim run --mapping <name>` (as an SpatialAIM reference mapper, one alignment per `K`) — including `--start_from_annotation`, where it maps onto a pre-existing annotation
 
 **4. Create PR**
 

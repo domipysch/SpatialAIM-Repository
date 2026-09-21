@@ -83,13 +83,11 @@ where = ["src"]
 [tool.black]
 line-length = 88
 target-version = ["py313"]
-extend-exclude = "00_Playground"
 
 [tool.mypy]
 python_version = "3.13"
 ignore_missing_imports = true
 disable_error_code = ["import-untyped"]
-exclude = ["00_Playground"]
 
 # The Streamlit GUI was never type-checked (it lived outside mypy's scope before
 # the package restructure). Kept out of scope here; typing it is left for later.

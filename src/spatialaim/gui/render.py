@@ -39,9 +39,21 @@ from spatialaim.analysis.utils import to_dense
 
 from spatialaim.metrics import kselection as scores
 
-from . import data_access
+from . import data_access, state_names
+from .state_names import label as _state_label
 
 logger = logging.getLogger(__name__)
+
+
+def _names_for(root: Path | None, k: int) -> dict[int, str]:
+    """This K's user-set cell-type names, read from the output dir above ``root``.
+
+    A run root is ``<output_dir>/<mapper>/`` and the names are shared by every
+    mapper, so they sit one level up. Empty when there is no root (a figure drawn
+    without a run, e.g. spatial-only) or nothing has been named.
+    """
+    return state_names.load(Path(root).parent, k) if root is not None else {}
+
 
 # Grey (as a CSS rgba string) for spots drawn below the confidence threshold.
 _GREY_RGBA = "rgba(184,184,184,0.9)"
@@ -277,6 +289,7 @@ def _add_state_centroid_markers(
     col: int,
     palette: dict[int, tuple],
     dot_size: float,
+    names: dict[int, str] | None = None,
 ) -> None:
     """Overlay one diamond per state at its (precomputed) projected expression
     centroid.
@@ -298,10 +311,10 @@ def _add_state_centroid_markers(
                     line=dict(width=1.5, color="black"),
                     opacity=1.0,
                 ),
-                name=f"Cell type {state} centroid",
+                name=f"{_state_label(state, names)} centroid",
                 legendgroup=f"state{state}",
                 showlegend=False,
-                hovertemplate=f"Cell type {state} centroid<extra></extra>",
+                hovertemplate=f"{_state_label(state, names)} centroid<extra></extra>",
             ),
             row=row,
             col=col,
@@ -367,6 +380,8 @@ def _add_umap_traces(
     dot_size: float,
     umap_key: str = OBSM_UMAP,
     equal_aspect: bool = True,
+    top_genes: dict[int, list[str]] | None = None,
+    names: dict[int, str] | None = None,
 ) -> None:
     """Add a UMAP scatter (one trace per state) to subplot (``row``, ``col``).
 
@@ -393,12 +408,14 @@ def _add_umap_traces(
                 y=coords[mask, 1],
                 mode="markers",
                 marker=dict(size=dot_size, color=_hex(palette.get(state)), opacity=1.0),
-                name=f"Cell type {state}",
+                name=_state_label(state, names),
                 legendgroup=f"state{state}",
                 showlegend=show,
                 customdata=start_cluster[mask][:, None],
                 hovertemplate=(
-                    f"Cell type {state}<br>Start cluster %{{customdata[0]}}"
+                    f"{_state_label(state, names)}"
+                    "<br>Start cluster %{customdata[0]}"
+                    f"{_top_genes_suffix(top_genes, state)}"
                     "<extra></extra>"
                 ),
             ),
@@ -426,6 +443,7 @@ def _add_umap_traces(
             col=col,
             palette=palette,
             dot_size=dot_size,
+            names=names,
         )
 
 
@@ -462,6 +480,8 @@ def _add_spatial_traces(
     dot_size: float,
     plot_confidence: bool = False,
     equal_aspect: bool = True,
+    top_genes: dict[int, list[str]] | None = None,
+    names: dict[int, str] | None = None,
 ) -> None:
     """Add the ST spatial scatter to subplot (``row``, ``col``).
 
@@ -491,10 +511,19 @@ def _add_spatial_traces(
                 name="confidence",
                 showlegend=False,
                 meta="spatial",
-                customdata=np.column_stack([confidence, hard]),
+                # One trace for every state here, so the label has to travel
+                # per point: an object array keeps the name a string and the
+                # confidence a float, which a column_stack would collapse.
+                customdata=np.array(
+                    [
+                        (float(c), _state_label(s, names))
+                        for c, s in zip(confidence, hard)
+                    ],
+                    dtype=object,
+                ),
                 hovertemplate=(
                     "confidence %{customdata[0]:.3f}<br>"
-                    "cell type %{customdata[1]}<br>"
+                    "%{customdata[1]}<br>"
                     "x %{x:.1f}  y %{y:.1f}<extra></extra>"
                 ),
             ),
@@ -522,9 +551,16 @@ def _add_spatial_traces(
                 name=f"below threshold ({n_low})",
                 legendgroup="below_threshold",
                 meta="spatial",
-                customdata=np.column_stack([hard[low], confidence[low]]),
+                # Mixed states in one trace, so the label rides along per point.
+                customdata=np.array(
+                    [
+                        (_state_label(s, names), float(c))
+                        for s, c in zip(hard[low], confidence[low])
+                    ],
+                    dtype=object,
+                ),
                 hovertemplate=(
-                    "Cell type %{customdata[0]} (below)<br>"
+                    "%{customdata[0]} (below)<br>"
                     "confidence %{customdata[1]:.3f}<br>"
                     "x %{x:.1f}  y %{y:.1f}<extra></extra>"
                 ),
@@ -537,25 +573,25 @@ def _add_spatial_traces(
         mask = keep & (hard == state)
         show = state not in legend_shown
         legend_shown.add(state)
+        genes = _top_genes_suffix(top_genes, state)
+        head = f"{_state_label(state, names)}{genes}"
         if confidence is not None:
             customdata = confidence[mask][:, None]
             hovertemplate = (
-                f"Cell type {state}<br>"
+                f"{head}<br>"
                 "confidence %{customdata[0]:.3f}<br>"
                 "x %{x:.1f}  y %{y:.1f}<extra></extra>"
             )
         else:
             customdata = None
-            hovertemplate = (
-                f"Cell type {state}<br>x %{{x:.1f}}  y %{{y:.1f}}<extra></extra>"
-            )
+            hovertemplate = f"{head}<br>x %{{x:.1f}}  y %{{y:.1f}}<extra></extra>"
         fig.add_trace(
             go.Scattergl(
                 x=coords[mask, 0],
                 y=coords[mask, 1],
                 mode="markers",
                 marker=dict(size=dot_size, color=_hex(palette.get(state)), opacity=1.0),
-                name=f"Cell type {state}",
+                name=_state_label(state, names),
                 legendgroup=f"state{state}",
                 showlegend=show,
                 meta="spatial",
@@ -580,8 +616,8 @@ def render_headline_figure(
     root: Path | None = None,
     plot_confidence: bool = False,
     show_shared_umap: bool = False,
-    dot_size_umap: float = 4.0,
-    dot_size_spatial: float = 6.0,
+    dot_size_umap: float = 3.0,
+    dot_size_spatial: float = 3.0,
 ) -> go.Figure:
     """One interactive figure holding the UMAP(s) and the spatial map as
     side-by-side subplots that share a single state legend.
@@ -595,6 +631,10 @@ def render_headline_figure(
 
     With ``plot_confidence`` the spatial panel is coloured by a continuous
     confidence scale (with a colourbar) instead of by state.
+
+    ``dot_size_*`` are the *un-zoomed* marker sizes. ``widgets.headline_plot``
+    grows them again as a panel is zoomed into, so these are the sizes that apply
+    at full extent and in a static export.
     """
     palette = state_palette(k)
     have_umap = adata_sc is not None and root is not None
@@ -623,9 +663,14 @@ def render_headline_figure(
         if conf_mode:
             spatial_title = "Spatial confidence"
         else:
-            spatial_title = "Spatial cell types"
+            spatial_title = "Mapped cell types"
             if confidence is not None and threshold > 0.0:
                 spatial_title += f" (confidence ≥ {threshold:.2f})"
+            # The mapping-dependent modularity belongs to this panel, the way each
+            # UMAP title carries its own reference-graph modularity above. Left off
+            # the confidence view, where it would read as a property of the
+            # confidence rather than of the mapping.
+            spatial_title += _mod_suffix(mod, "modularity_st_expression")
         titles.append(spatial_title)
 
     n_cols = max(1, len(titles))
@@ -643,6 +688,10 @@ def render_headline_figure(
 
     legend_shown: set[int] = set()
     col = 1
+    # Every panel's hover box names the state's most enriched genes; needs the
+    # scaffold, so it is empty (and the hover unchanged) on a spatial-only figure.
+    top_genes = top_genes_per_state(adata_sc if have_umap else None, root, k)
+    names = _names_for(root, k)
     # Each adder pins its own subplot axes.
     if have_shared:
         _add_umap_traces(
@@ -656,6 +705,8 @@ def render_headline_figure(
             dot_size=dot_size_umap,
             umap_key=OBSM_UMAP_SHARED_GENES,
             equal_aspect=equal_aspect,
+            top_genes=top_genes,
+            names=names,
         )
         col += 1
     if have_umap:
@@ -670,6 +721,8 @@ def render_headline_figure(
             dot_size=dot_size_umap,
             umap_key=OBSM_UMAP,
             equal_aspect=equal_aspect,
+            top_genes=top_genes,
+            names=names,
         )
         col += 1
     if have_spatial:
@@ -685,6 +738,8 @@ def render_headline_figure(
             dot_size=dot_size_spatial,
             plot_confidence=plot_confidence,
             equal_aspect=equal_aspect,
+            top_genes=top_genes,
+            names=names,
         )
 
     # Keep the state legend as a fixed horizontal strip on top in every mode, so
@@ -706,8 +761,8 @@ def render_compare_figure(
     *,
     adata_sc: AnnData | None = None,
     root: Path | None = None,
-    dot_size_umap: float = 4.0,
-    dot_size_spatial: float = 6.0,
+    dot_size_umap: float = 3.0,
+    dot_size_spatial: float = 3.0,
 ) -> go.Figure:
     """One reference UMAP centred on top, then the selected mappers' spatial maps
     in a grid below (two per row), all in one figure with a single shared state
@@ -753,6 +808,10 @@ def render_compare_figure(
 
     legend_shown: set[int] = set()
     umap_row = 1 if have_umap else 0
+    # The tree cut is shared across mappers, so one set of top genes and one set
+    # of names serve every panel here.
+    top_genes = top_genes_per_state(adata_sc if have_umap else None, root, k)
+    names = _names_for(root, k)
     if have_umap:
         _add_umap_traces(
             fig,
@@ -765,6 +824,8 @@ def render_compare_figure(
             legend_shown=legend_shown,
             dot_size=dot_size_umap,
             umap_key=OBSM_UMAP,
+            top_genes=top_genes,
+            names=names,
         )
     for j, hard in enumerate(hards):
         _add_spatial_traces(
@@ -779,6 +840,8 @@ def render_compare_figure(
             legend_shown=legend_shown,
             dot_size=dot_size_spatial,
             plot_confidence=False,
+            top_genes=top_genes,
+            names=names,
         )
 
     height = (umap_px if have_umap else 0) + spatial_px * n_spatial_rows + 60
@@ -888,13 +951,21 @@ def render_compare_box_figure(
 
 
 def render_compare_fractions_figure(
-    spot_fracs: dict[str, list[float]], k: int, *, height: int = 300
+    spot_fracs: dict[str, list[float]],
+    k: int,
+    *,
+    height: int = 300,
+    names: dict[int, str] | None = None,
 ) -> go.Figure:
     """Grouped bar of the spot-state fraction per state, one bar group per state
     and one bar per mapper. (Cell fractions are identical across mappers, so only
-    the mapping-dependent spot fractions are compared here.)"""
+    the mapping-dependent spot fractions are compared here.)
+
+    Takes ``names`` rather than reading them itself: it gets fractions, not a run
+    root, so the caller is the one that knows the output dir.
+    """
     states = list(range(k))
-    x = [f"Cell type {s}" for s in states]
+    x = [_state_label(s, names) for s in states]
     fig = go.Figure()
     for i, (m, fr) in enumerate(spot_fracs.items()):
         fig.add_trace(go.Bar(name=m, x=x, y=fr, marker_color=_mapper_color(i)))
@@ -924,9 +995,14 @@ def _add_start_cluster_umap_traces(
     row: int = 1,
     dot_size: float,
     equal_aspect: bool = True,
+    state_labels: dict[int, str] | None = None,
 ) -> None:
     """Add the start-cluster UMAP (one trace per start cluster) to subplot
     (``row``, ``col``).
+
+    ``state_labels`` names the state each start cluster merges into, for the
+    hover's "-> <cell type>" line; the traces themselves are start clusters and
+    keep their own names.
 
     Each start cluster gets a distinct qualitative colour but is tagged with the
     ``state<n>`` legendgroup of the state it merges into, so a single legend click
@@ -939,6 +1015,7 @@ def _add_start_cluster_umap_traces(
     for i, lc in enumerate(sorted(np.unique(start_cluster).tolist())):
         mask = start_cluster == lc
         s = int(start_cluster_to_state[lc])
+        target = _state_label(s, state_labels)
         fig.add_trace(
             go.Scattergl(
                 x=coords[mask, 0],
@@ -948,7 +1025,7 @@ def _add_start_cluster_umap_traces(
                 name=names[lc],
                 legendgroup=f"state{s}",
                 showlegend=False,
-                hovertemplate=(f"{names[lc]}<br>→ Cell type {s}<extra></extra>"),
+                hovertemplate=(f"{names[lc]}<br>→ {target}<extra></extra>"),
             ),
             row=row,
             col=col,
@@ -971,7 +1048,7 @@ def render_reference_umaps_figure(
     root: Path,
     k: int,
     *,
-    dot_size_umap: float = 4.0,
+    dot_size_umap: float = 3.0,
 ) -> go.Figure:
     """Three reference UMAPs sharing one state legend: the start clustering
     (left), the computed states on the all-gene UMAP (middle), and the computed
@@ -1005,8 +1082,17 @@ def render_reference_umaps_figure(
     )
 
     legend_shown: set[int] = set()
+    top_genes = top_genes_per_state(adata_sc, root, k)
+    names = _names_for(root, k)
+    # Left panel shows start clusters, not cell types, so it gets no top genes —
+    # only the names, for the "-> <cell type>" line in its hover.
     _add_start_cluster_umap_traces(
-        fig, adata_sc, start_cluster_to_state, col=1, dot_size=dot_size_umap
+        fig,
+        adata_sc,
+        start_cluster_to_state,
+        col=1,
+        dot_size=dot_size_umap,
+        state_labels=names,
     )
     _add_umap_traces(
         fig,
@@ -1018,6 +1104,8 @@ def render_reference_umaps_figure(
         legend_shown=legend_shown,
         dot_size=dot_size_umap,
         umap_key=OBSM_UMAP,
+        top_genes=top_genes,
+        names=names,
     )
     if have_shared:
         _add_umap_traces(
@@ -1030,6 +1118,8 @@ def render_reference_umaps_figure(
             legend_shown=legend_shown,
             dot_size=dot_size_umap,
             umap_key=OBSM_UMAP_SHARED_GENES,
+            top_genes=top_genes,
+            names=names,
         )
 
     return _base_layout(
@@ -1049,6 +1139,7 @@ def render_start_cluster_merge_figure(
     start_cluster_to_state = load_start_cluster_to_state(data_access.k_dir(root, k))
     infer_cell_to_state_cluster(adata_sc, start_cluster_to_state)
     names = _start_cluster_names(adata_sc)
+    state_labels = _names_for(root, k)
     start_cluster = adata_sc.obs[OBS_START_CLUSTER].astype(int).to_numpy()
     cell_states = adata_sc.obs[OBS_COMPUTED_STATE].astype(int).to_numpy()
     palette = state_palette(k)
@@ -1065,7 +1156,7 @@ def render_start_cluster_merge_figure(
 
     def _row(s: int) -> str:
         n = len(start_clusters_of_state[s])
-        return f"Cell type {s}  ({n} cluster{'s' if n != 1 else ''})"
+        return f"{_state_label(s, state_labels)}  ({n} cluster{'s' if n != 1 else ''})"
 
     fig = go.Figure()
     # barmode="stack" accumulates same-row segments in trace order (largest first).
@@ -1084,7 +1175,8 @@ def render_start_cluster_merge_figure(
                     textfont=dict(size=9, color="black"),
                     showlegend=False,
                     hovertemplate=(
-                        f"Cell type {s} · {names[lc]}<br>%{{x}} cells<extra></extra>"
+                        f"{_state_label(s, state_labels)} · {names[lc]}"
+                        "<br>%{x} cells<extra></extra>"
                     ),
                 )
             )
@@ -1106,23 +1198,29 @@ def render_start_cluster_merge_figure(
     return fig
 
 
-def render_state_profiles_figure(
-    adata_sc: AnnData, root: Path, k: int
-) -> go.Figure | None:
-    """Heatmap of per-state mean expression over the shared genes (sorted by SC
-    variance, z-scored per gene across states). Returns ``None`` when too few
-    shared genes are present to plot.
-    """
-    start_cluster_to_state = load_start_cluster_to_state(data_access.k_dir(root, k))
-    infer_cell_to_state_cluster(adata_sc, start_cluster_to_state)
-    cell_states = adata_sc.obs[OBS_COMPUTED_STATE].astype(int).to_numpy()
+@st.cache_data(show_spinner=False)
+def _state_profiles(_adata_sc, root_str: str, k: int):
+    """Per-state mean expression over the shared genes, z-scored per gene across
+    states — genes ordered by decreasing scRNA variance.
 
-    shared_genes = list(adata_sc.uns.get(UNS_SHARED_GENES, []))
-    available = [g for g in shared_genes if g in adata_sc.var_names]
+    Returns ``{"z", "genes", "states"}`` or ``None`` when fewer than two shared
+    genes are present. Cached on ``(root, k)`` because both the profile heatmap
+    and the hover boxes' top genes read it, and it is an O(cells x genes) pass;
+    ``_adata_sc`` leads with an underscore so ``st.cache_data`` does not hash the
+    scaffold (it is the stable, resource-cached one for this run root).
+    """
+    start_cluster_to_state = load_start_cluster_to_state(
+        data_access.k_dir(Path(root_str), k)
+    )
+    infer_cell_to_state_cluster(_adata_sc, start_cluster_to_state)
+    cell_states = _adata_sc.obs[OBS_COMPUTED_STATE].astype(int).to_numpy()
+
+    shared_genes = list(_adata_sc.uns.get(UNS_SHARED_GENES, []))
+    available = [g for g in shared_genes if g in _adata_sc.var_names]
     if len(available) < 2:
         return None
 
-    X = to_dense(adata_sc[:, available])
+    X = to_dense(_adata_sc[:, available])
     gene_names = np.array(available)
     gene_order = np.argsort(X.var(axis=0))[::-1]
 
@@ -1132,13 +1230,69 @@ def render_state_profiles_figure(
     )
     col_std = mat.std(axis=0)
     col_std[col_std == 0] = 1.0
-    mat_z = (mat - mat.mean(axis=0)) / col_std
+    return {
+        "z": (mat - mat.mean(axis=0)) / col_std,
+        "genes": gene_names[gene_order].tolist(),
+        "states": unique_states,
+    }
 
+
+def top_genes_per_state(
+    adata_sc: AnnData | None, root: Path | None, k: int, n: int = 3
+) -> dict[int, list[str]]:
+    """The ``n`` genes a state is most enriched for, highest z-score first.
+
+    Same z-scores the profile heatmap shows (per gene across states), so a state's
+    hover box names the genes that make its row light up there. Empty when the
+    scaffold or the profiles are unavailable — callers then simply show no genes.
+    """
+    if adata_sc is None or root is None:
+        return {}
+    prof = _state_profiles(adata_sc, str(root), int(k))
+    if prof is None:
+        return {}
+    genes, z = prof["genes"], prof["z"]
+    return {
+        int(s): [genes[j] for j in np.argsort(z[i])[::-1][:n]]
+        for i, s in enumerate(prof["states"])
+    }
+
+
+def _top_genes_suffix(top_genes: dict[int, list[str]] | None, state: int) -> str:
+    """``<br>Top genes: A, B, C`` for a state's hover box, or '' if unknown."""
+    hits = (top_genes or {}).get(int(state))
+    return f"<br>Top genes: {', '.join(hits)}" if hits else ""
+
+
+def render_state_profiles_figure(
+    adata_sc: AnnData, root: Path, k: int
+) -> go.Figure | None:
+    """Heatmap of per-state mean expression over the shared genes (sorted by SC
+    variance, z-scored per gene across states). Returns ``None`` when too few
+    shared genes are present to plot.
+
+    Each row label is prefixed with the state's colour from the shared palette, so
+    a row can be tied back to the UMAP and spatial panels above without counting.
+    """
+    prof = _state_profiles(adata_sc, str(root), int(k))
+    if prof is None:
+        return None
+    unique_states = prof["states"]
+
+    palette = state_palette(k)
     fig = go.Figure(
         go.Heatmap(
-            z=mat_z,
-            x=gene_names[gene_order].tolist(),
-            y=[f"Cell type {s}" for s in unique_states],
+            z=prof["z"],
+            x=prof["genes"],
+            # Plotly renders a <span style="color:..."> in tick labels, which is
+            # the only way to colour one tick differently from the next. The dot
+            # is set in px (not em, which Plotly's text renderer ignores) a few
+            # steps above the 13px tick font, so it reads as a swatch.
+            y=[
+                f'<span style="color:{_hex(palette.get(s))};font-size:22px">●</span>'
+                f" {_state_label(s, _names_for(root, k))}"
+                for s in unique_states
+            ],
             colorscale="Viridis",
             colorbar=dict(title="z-score", thickness=12),
             hovertemplate="%{y}<br>%{x}<br>z %{z:.2f}<extra></extra>",
@@ -1148,12 +1302,10 @@ def render_state_profiles_figure(
     _base_layout(
         fig,
         height=max(240, n_states * 42 + 160),
-        title=(
-            "Cell-type profiles — shared genes " "(z-scored per gene across cell types)"
-        ),
-        xaxis_title="Gene  (sorted by SC variance)",
+        xaxis_title="Gene",
         yaxis_title="Computed cell type",
-        margin=dict(l=10, r=10, t=50, b=80),
+        # No title: the card header above the figure already names it.
+        margin=dict(l=10, r=10, t=10, b=80),
     )
     # State 0 on top.
     fig.update_yaxes(autorange="reversed")
@@ -1515,7 +1667,7 @@ def render_fractions_figure(
 
     palette = state_palette(k)
     states = list(range(k))
-    x = [f"Cell type {s}" for s in states]
+    x = [_state_label(s, _names_for(root, k)) for s in states]
     colors = [_hex(palette.get(s)) for s in states]
     cell_frac = [float(np.mean(cell_states == s)) for s in states]
     spot_frac = [float(np.mean(hard == s)) for s in states]
@@ -1651,7 +1803,9 @@ def render_confidence_figure(confidence: np.ndarray) -> go.Figure:
         go.Histogram(
             x=confidence,
             xbins=dict(start=0.0, end=1.0, size=1.0 / 40),
-            marker_color="#2ca02c",
+            # Same blue as render_onehot_figure: both fill the Mapping Confidence
+            # card, so the colour must not imply the panels are unrelated.
+            marker_color=_CELL_COLOR,
         )
     )
     fig.add_vline(

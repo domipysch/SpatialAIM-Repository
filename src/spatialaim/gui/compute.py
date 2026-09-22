@@ -81,7 +81,7 @@ class MapperRun:
             )
         except Exception:  # noqa: BLE001 - surface any failure to the UI
             self.error = traceback.format_exc()
-            logger.exception("Mapper sweep failed for %s", self.mapper)
+            logger.exception("Mapper run failed for %s", self.mapper)
 
     # -- progress ---------------------------------------------------------
     def is_running(self) -> bool:

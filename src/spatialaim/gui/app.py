@@ -1,10 +1,10 @@
-"""Streamlit UI for browsing SpatialAIM sweep results.
+"""Streamlit UI for browsing SpatialAIM results.
 
 Launched by ``gui/__main__.py`` via ``streamlit run gui/app.py -- <args>``. Not
 meant to be run directly. Reads the up-front CLI args (sc/ST/output/K-range),
 lets the user run one mapper at a time, then browses each mapper's per-K results
 with a K slider, a live confidence-threshold slider, the UMAP + spatial plots on
-top, the report sections below, and the K-sweep plot -- with a Compare tab for
+top, the report sections below, and the K-plot -- with a Compare tab for
 two mappers side by side.
 """
 
@@ -28,6 +28,7 @@ from spatialaim.gui import (
     data_access,
     render,
     scaffold,
+    state_names,
     widgets,
 )
 from spatialaim.metrics import kselection as scores
@@ -226,14 +227,122 @@ def _plot_card(
 # --------------------------------------------------------------------------- #
 # Small helpers
 # --------------------------------------------------------------------------- #
-def _render_card_grid(cards: list[tuple[str, Callable[[], None]]]) -> None:
-    """Lay out ``(title, body)`` cards two per row, each in a bordered container."""
+class _Card(NamedTuple):
+    """One report card: a bold title, the body that draws it, and optionally the
+    explanation behind the card's ``?``. Cards without ``help`` get no ``?``."""
+
+    title: str
+    body: Callable[[], None]
+    help: str | None = None
+    # Distinguishes the ``?`` buttons of two cards that share a title (a mapper
+    # tab and the Compare tab render the same grid function).
+    key: str = ""
+
+
+@st.dialog("Set cell type names", width="large")
+def _state_names_dialog(
+    adata_sc: "AnnData", ref_root: Path, output_dir: Path, k: int
+) -> None:
+    """Name this K's computed cell types, next to the UMAP that shows them.
+
+    The names belong to ``(output_dir, K)`` and are shared by every mapper (they
+    all cut the same tree), so one edit here relabels every tab at this K. A field
+    left empty keeps that cell type's default ``Cell type <n>``.
+    """
+    left, right = st.columns([3, 2], gap="medium")
+
+    with left:
+        try:
+            # coords=None -> the reference UMAP alone, which is all this modal
+            # needs; hard/confidence are only read by the spatial panel.
+            fig = render.render_headline_figure(
+                None, np.array([]), None, 0.0, k, adata_sc=adata_sc, root=ref_root
+            )
+            fig.update_layout(height=430, margin=dict(l=0, r=0, t=60, b=0))
+            st.plotly_chart(fig, width="stretch", key="namesdlg_umap")
+        except Exception as exc:  # noqa: BLE001 - the table stays usable without it
+            st.info(f"UMAP unavailable: {exc}")
+
+    palette = render.state_palette(k)
+    current = state_names.load(output_dir, k)
+    with right:
+        st.caption("Leave a field empty to keep the default label.")
+        values: dict[int, str] = {}
+        for s in range(k):
+            # A flex row rather than nested columns, which Streamlit only allows
+            # one level deep and this is already inside a column.
+            row = st.container(horizontal=True, vertical_alignment="center")
+            row.markdown(
+                f'<span style="color:{palette.get(s, "#b8b8b8")};font-size:20px">'
+                f"●</span>&nbsp;Cell type {s}",
+                unsafe_allow_html=True,
+            )
+            values[s] = row.text_input(
+                f"Name for cell type {s}",
+                value=current.get(s, ""),
+                key=f"namesdlg_{k}_{s}",
+                label_visibility="collapsed",
+                placeholder=f"Cell type {s}",
+            )
+
+    st.divider()
+    save, cancel = st.columns(2)
+    if save.button("Save", type="primary", width="stretch", key="namesdlg_save"):
+        state_names.save(output_dir, k, values)
+        st.rerun()
+    if cancel.button("Cancel", width="stretch", key="namesdlg_cancel"):
+        st.rerun()
+
+
+@st.dialog("About this card", width="large")
+def _card_help_dialog() -> None:
+    """Modal explaining one report card.
+
+    One dialog serves every card, reading which one from session state. An open
+    dialog is re-run by Streamlit as a stored fragment, so the decorator stays at
+    module level and the card's own title goes in the body — decorating per call
+    to get a dynamic dialog title would make that stored fragment a function
+    object rebuilt on every run.
+    """
+    title = st.session_state.get("_card_help_title", "")
+    if title:
+        st.markdown(f"**{title}**")
+    st.markdown(st.session_state.get("_card_help_text", ""))
+    if st.button("Close", key="card_help_close"):
+        st.rerun()
+
+
+def _render_card_grid(cards: list[_Card]) -> None:
+    """Lay out cards two per row, each in a bordered container.
+
+    The header is one distributed flex row, not two columns: a column keeps its
+    share of the width whatever it holds, so the ``?`` ended up left-aligned
+    inside its own column with dead space to its right. ``distribute`` pushes the
+    first and last element to the two edges instead, so the icon sits flush in
+    the card's top-right corner.
+    """
     for start in range(0, len(cards), 2):
         cols = st.columns(2)
-        for col, (title, body) in zip(cols, cards[start : start + 2]):
+        for col, card in zip(cols, cards[start : start + 2]):
             with col, st.container(border=True):
-                st.markdown(f"**{title}**")
-                body()
+                hdr = st.container(
+                    horizontal=True,
+                    horizontal_alignment="distribute",
+                    vertical_alignment="center",
+                )
+                hdr.markdown(f"**{card.title}**")
+                if card.help:
+                    if hdr.button(
+                        "",
+                        icon=":material/help:",
+                        type="tertiary",
+                        key=f"cardhelp_{card.key or card.title}",
+                        help="What is shown here?",
+                    ):
+                        st.session_state["_card_help_title"] = card.title
+                        st.session_state["_card_help_text"] = card.help
+                        _card_help_dialog()
+                card.body()
 
 
 def _render_metrics(container, d: dict, level: int = 0) -> None:
@@ -381,7 +490,7 @@ def _render_progress(mapper: str, run: "compute.MapperRun") -> None:
             else f"start clusters from {run.start_from_annotation}…"
         )
         st.progress(0.0, text=f"Computing {mapper}: {stage}")
-    st.caption("This tab will show results when the sweep finishes.")
+    st.caption("This tab will show results when the run finishes.")
 
 
 class _Controls(NamedTuple):
@@ -421,7 +530,7 @@ def _set_ctrl_k(idx: int) -> None:
 
 
 def _pick_k_callback(state_key: str, ks_all: list[int]):
-    """``on_pick`` for a linked K-sweep card: move the shared K slider to the K
+    """``on_pick`` for a linked K-plot card: move the shared K slider to the K
     that was clicked. Runs as a widget callback, i.e. before the script body
     re-instantiates the slider, so writing its session-state key is allowed."""
 
@@ -616,7 +725,7 @@ def _ksweep_section(
 
         st.divider()
         if not best:
-            st.caption("No criterion could be scored for this sweep yet.")
+            st.caption("No criterion could be scored for this run yet.")
         _best_k_row("overall")
 
         if st.button(
@@ -691,12 +800,90 @@ def _mapper_tab(
 
 _SUBSCRIPT = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 
+# Which fields the Spatial-organisation card shows per metric group, and in what
+# order — the z-score first, since it is the number that is comparable across K;
+# the raw fraction and the null it was scored against come after. Fields left out
+# here (nhood_enrichment's n_states) are not displayed; the analysis still writes
+# them. A group missing from this map is shown whole, in its stored order.
+_TOPOLOGY_FIELDS: dict[str, tuple[str, ...]] = {
+    "local_purity": ("z_score", "p_value", "observed", "null_mean", "null_std"),
+    "nhood_enrichment": ("mean_self_zscore",),
+}
 
-def _confidence_caption(mapper: str) -> str | None:
+
+def _topology_groups(metrics: dict) -> dict[str, dict]:
+    """The nested metric groups of ``topology_metrics.json``, shaped for display.
+
+    Drops the top-level scalars (n_spots, k, n_perm, ...) and, for a known group,
+    keeps only the fields in ``_TOPOLOGY_FIELDS`` in that order. Fields absent
+    from the JSON are skipped, so a run written before a field existed still
+    renders. ``nhood_enrichment`` is null when there are too few mapped states;
+    that is not a dict, so it drops out here as it always did.
+    """
+    out: dict[str, dict] = {}
+    for group, vals in metrics.items():
+        if not isinstance(vals, dict):
+            continue
+        order = _TOPOLOGY_FIELDS.get(group)
+        out[group] = vals if order is None else {f: vals[f] for f in order if f in vals}
+    return out
+
+
+# Card help texts, opened by each report card's "?". The Mapping-confidence one is
+# per method and built by _confidence_caption instead.
+_HELP_FRACTIONS = """
+For each computed cell type you see two bars:
+
+- **Cell (solid)**: the fraction of reference cells belonging to that cell type.
+  (It follows from the tree cut alone, so it is the same for every mapping
+  method.)
+- **Spot (hatched)**: the fraction of spatial cells this method assigned to that
+  cell type.
+
+The two need not match: the reference and the tissue section need not contain the
+same mix of cells.
+"""
+
+_HELP_RECONSTRUCTION = """
+Each spatial cell's gene expression is predicted from the cell type profiles it
+was mapped onto, and compared against the measured ST expression of that same
+spatial cell over the shared genes, by cosine similarity (0–1, higher is better).
+
+There are two panels: gene-wise and spot-wise cosine similarity. In each panel
+there are four boxes:
+
+- **soft** predicts gene expression from the original spatial cell × cell-types
+  probability matrix, so a spatial cell is a weighted blend of profiles; **hard**
+  predicts from the single winning cell type's profile alone.
+- **raw** compares raw counts; **norm** compares log-normalised expression
+  (total-count normalised to 1e4, then log1p, over the shared genes).
+"""
+
+_HELP_SPATIAL_ORG = """
+Quantify whether the mapped cell types form coherent tissue structure.
+
+Start with a spatial 6nn-graph: connect each spatial cell to its 6 nearest
+neighbours. Then compute:
+
+- **Local purity**: the fraction of links where two neighbours carry the same
+  cell type (z-scored against random null permutations).
+- **Self neighbourhood enrichment**: mean over all cell types of the number of
+  edges connecting two spatial cells of that cell type (z-scored against null
+  permutations).
+
+For both z-scores, 0 means the mapping is spatially no better arranged than
+random relabelling; clearly positive means it forms spatial domains.
+"""
+
+
+def _confidence_caption(mapper: str) -> str:
     """A short, per-method explanation of how each spot's confidence is defined,
-    shown under the "Mapping Confidence — Per-Spot" card. ``None`` for mappers
-    that write no confidence (the external reference aligners), whose card is not
-    shown anyway."""
+    shown in the "Mapping confidence per spot" card's help modal.
+
+    The reference aligners write no confidence of their own, so their card falls
+    back to the soft mapping they return; the caption says so rather than letting
+    the two quantities look interchangeable.
+    """
     if mapper == "nearest_centroid":
         dn = f"d{str(N_TOP_STATES).translate(_SUBSCRIPT)}"  # e.g. "d₄"
         return (
@@ -712,7 +899,12 @@ def _confidence_caption(mapper: str) -> str | None:
             "Each spot gets a reliability-weighted soft vote over the cell types; its "
             "confidence is how one-hot that vote is — 1 (normalised Shannon entropy)."
         )
-    return None
+    return (
+        f"**{_MAPPER_LABELS.get(mapper, mapper)}** returns a soft spots × cell-types "
+        "mapping and no confidence of its own, so what is shown is the **maximum "
+        "value per spot in that returned soft mapping**: how much of a spot's weight "
+        "the winning cell type holds."
+    )
 
 
 def _report_dashboard(
@@ -725,20 +917,20 @@ def _report_dashboard(
     # The fractions card is simply skipped if the scaffold can't be built.
     adata_sc = _load_scaffold(args)
 
-    def _sharpness() -> None:
-        summ = data_access.load_data_json(root, k, "onehot_summary_mapping.json")
-        caption = None
-        if summ and summ.get("summary"):
-            s = summ["summary"]
-            caption = (
-                f"Gini mean {s['gini_impurity']['mean']:.3f}  ·  "
-                f"entropy mean {s['entropy']['mean']:.3f}"
-            )
+    def _confidence() -> None:
+        # nearest_centroid and wann each define their own per-spot confidence and
+        # write it out; the reference aligners do not, so their card shows the max
+        # per spot of the soft mapping they return instead (see the caption).
+        fig = (
+            render.render_confidence_figure(confidence)
+            if confidence is not None
+            else render.render_onehot_figure(P.max(axis=1))
+        )
+        # No caption: the per-method explanation is what the card's ``?`` opens.
         _plot_card(
-            render.render_onehot_figure(P.max(axis=1)),
-            key=f"card_sharp_{mapper}",
-            stem=f"{mapper}_k{k:03d}_sharpness",
-            caption=caption,
+            fig,
+            key=f"card_conf_{mapper}",
+            stem=f"{mapper}_k{k:03d}_confidence",
         )
 
     def _spatial_org() -> None:
@@ -747,65 +939,61 @@ def _report_dashboard(
             st.info("topology_metrics.json not found for this K.")
             return
         # Drop the top-level scalar table; keep the metric groups (local purity,
-        # neighbourhood enrichment).
-        nested = {kk: vv for kk, vv in metrics.items() if isinstance(vv, dict)}
+        # neighbourhood enrichment), each shaped by _TOPOLOGY_FIELDS.
+        nested = _topology_groups(metrics)
         if nested:
             _render_metrics(st, nested)
         else:
             st.info("No spatial-organisation sub-metrics for this K.")
 
-    def _modularity() -> None:
-        metrics = data_access.load_data_json(root, k, "modularity_metrics.json")
-        # Only the mapping-dependent modularity belongs here; the reference-graph
-        # modularities live on the Single-cell reference tab. Coherence has no
-        # meaningful label-shuffle null, so the analysis records none.
-        keys = ("modularity_st_expression",)
-        shown = {kk: metrics[kk] for kk in keys if metrics and kk in metrics}
-        if shown:
-            _render_metrics(st, shown)
-        else:
-            st.info("modularity_metrics.json not found for this K.")
-
-    # Assemble the cards (title, body). Only include those that have data.
-    cards: list[tuple[str, Callable[[], None]]] = []
+    # Assemble the cards. Only include those that have data; each carries the text
+    # its ``?`` opens.
+    # No Modularity card: the one mapping-dependent value it held now rides in the
+    # spatial panel's subplot title (see render._mod_suffix).
+    cards: list[_Card] = []
     if adata_sc is not None:
         cards.append(
-            (
-                "Cell-Type Fractions — Cells & Spots",
+            _Card(
+                "Cell type fractions",
                 lambda: _plot_card(
                     render.render_fractions_figure(adata_sc, root, k, hard),
                     key=f"card_frac_{mapper}",
                     stem=f"{mapper}_k{k:03d}_fractions",
                 ),
+                help=_HELP_FRACTIONS,
+                key=f"frac_{mapper}",
             )
         )
     cossim = data_access.load_cossim_distributions(root, k)
     if cossim:
         cards.append(
-            (
+            _Card(
                 "Reconstruction Cosine Similarity",
                 lambda: _plot_card(
                     render.render_reconstruction_figure(cossim),
                     key=f"card_recon_{mapper}",
                     stem=f"{mapper}_k{k:03d}_reconstruction",
                 ),
+                help=_HELP_RECONSTRUCTION,
+                key=f"recon_{mapper}",
             )
         )
-    cards.append(("Mapping Sharpness — How One-Hot", _sharpness))
-    if confidence is not None:
-        cards.append(
-            (
-                "Mapping Confidence — Per-Spot",
-                lambda: _plot_card(
-                    render.render_confidence_figure(confidence),
-                    key=f"card_conf_{mapper}",
-                    stem=f"{mapper}_k{k:03d}_confidence",
-                    caption=_confidence_caption(mapper),
-                ),
-            )
+    cards.append(
+        _Card(
+            "Mapping confidence per spot",
+            _confidence,
+            help=_confidence_caption(mapper),
+            key=f"conf_{mapper}",
         )
-    cards.append(("Spatial Organisation of Mapped Spots", _spatial_org))
-    cards.append(("Modularity", _modularity))
+    )
+    cards.append(
+        _Card(
+            "Spatial organisation",
+            _spatial_org,
+            help=_HELP_SPATIAL_ORG,
+            key=f"topo_{mapper}",
+        )
+    )
 
     _render_card_grid(cards)
 
@@ -887,12 +1075,9 @@ def _compare_sections(
 
     # Gather each method's per-K data once.
     cossims: dict[str, dict] = {}
-    maxprobs: dict[str, np.ndarray] = {}
     spot_fracs: dict[str, list[float]] = {}
     for m, hard in zip(valid, hards):
-        P, _hard, _conf = _load_soft(str(roots[m]), k)
         cossims[m] = data_access.load_cossim_distributions(roots[m], k)
-        maxprobs[m] = P.max(axis=1)
         spot_fracs[m] = [float(np.mean(hard == s)) for s in range(k)]
 
     def _reconstruction() -> None:
@@ -904,37 +1089,28 @@ def _compare_sections(
                 fig, key="cmp_sec_recon", stem=f"compare_reconstruction_k{k:03d}"
             )
 
-    def _sharpness() -> None:
-        _plot_card(
-            render.render_compare_box_figure(
-                maxprobs,
-                title="Per-spot max probability (1.0 = one-hot)",
-                ytitle="max probability",
-            ),
-            key="cmp_sec_sharp",
-            stem=f"compare_sharpness_k{k:03d}",
-        )
-
     def _fractions() -> None:
         _plot_card(
-            render.render_compare_fractions_figure(spot_fracs, k),
+            render.render_compare_fractions_figure(
+                spot_fracs, k, names=state_names.load(args.output_dir, k)
+            ),
             key="cmp_sec_frac",
             stem=f"compare_fractions_k{k:03d}",
             caption="Cell fractions are identical across methods (see a method tab).",
         )
 
     def _spatial_org() -> None:
-        # Nested metric groups (drop the top-level scalars), methods as columns.
+        # The same groups and field order as a method tab's card (_TOPOLOGY_FIELDS),
+        # flattened to one row per field with methods as columns.
         cols: dict[str, dict] = {}
         for m in valid:
             topo = (
                 data_access.load_data_json(roots[m], k, "topology_metrics.json") or {}
             )
             flat: dict[str, float] = {}
-            for grp, sub in topo.items():
-                if isinstance(sub, dict):
-                    for name, val in sub.items():
-                        flat[f"{grp}.{name}"] = val
+            for grp, sub in _topology_groups(topo).items():
+                for name, val in sub.items():
+                    flat[f"{grp}.{name}"] = val
             cols[m] = flat
         df = pd.DataFrame(cols)
         if df.empty:
@@ -953,13 +1129,12 @@ def _compare_sections(
         df = pd.DataFrame({"modularity_st_expression": row}).T
         st.dataframe(df.round(4), width="stretch")
 
-    cards: list[tuple[str, "Callable[[], None]"]] = [
-        ("Reconstruction Cosine Similarity", _reconstruction),
-        ("Cell-Type Fractions — Cells & Spots", _fractions),
-        ("Mapping Sharpness — How One-Hot", _sharpness),
+    cards: list[_Card] = [
+        _Card("Reconstruction Cosine Similarity", _reconstruction, key="cmp_recon"),
+        _Card("Cell type fractions", _fractions, key="cmp_frac"),
     ]
-    cards.append(("Spatial Organisation of Mapped Spots", _spatial_org))
-    cards.append(("Modularity", _modularity))
+    cards.append(_Card("Spatial organisation", _spatial_org, key="cmp_topo"))
+    cards.append(_Card("Modularity", _modularity, key="cmp_mod"))
 
     _render_card_grid(cards)
 
@@ -1010,13 +1185,7 @@ def _reference_tab(
     )
 
     st.divider()
-    with st.expander("Start Clusters Merged per SpatialAIM Cell Type", expanded=True):
-        _plot_card(
-            render.render_start_cluster_merge_figure(adata_sc, ref_root, ctrl.k),
-            key="ref_start_cluster_merge",
-            stem=f"reference_start_cluster_merge_k{ctrl.k:03d}",
-        )
-    with st.expander("SpatialAIM Cell-Type Profiles", expanded=True):
+    with st.expander("Cell type profiles", expanded=True):
         fig_prof = render.render_state_profiles_figure(adata_sc, ref_root, ctrl.k)
         if fig_prof is None:
             st.info("Too few shared genes to plot the cell-type-profile heatmap.")
@@ -1026,37 +1195,19 @@ def _reference_tab(
                 key="ref_profiles",
                 stem=f"reference_state_profiles_k{ctrl.k:03d}",
             )
-    with st.expander("Sub-Type Merge Coherence", expanded=False):
-        metrics = data_access.load_data_json(ref_root, ctrl.k, "biology_metrics.json")
-        if not metrics:
-            st.info("biology_metrics.json not found for this K.")
-        else:
-            # One table for all states: state per row, metric fields as columns
-            # (states that were skipped simply have NaN in the metric columns).
-            per_state = metrics.get("per_state", {})
-            if per_state:
-                df = pd.DataFrame.from_dict(per_state, orient="index")
-                df.insert(0, "cell type", [int(s) for s in per_state.keys()])
-                df = df.sort_values("cell type").reset_index(drop=True).round(4)
-                st.dataframe(df, hide_index=True, width="stretch")
-            agg = metrics.get("aggregate") or {}
-            parts = [f"n_perm = {metrics.get('n_perm')}"]
-            for name, val in agg.items():
-                parts.append(
-                    f"{name} = {val:.4g}"
-                    if isinstance(val, float)
-                    else f"{name} = {val}"
-                )
-            st.caption("Aggregate:   " + "   •   ".join(parts))
-    with st.expander("Modularity", expanded=False):
-        # Reference-graph modularities only (mapper-independent); the
-        # mapping-dependent modularity_st_expression lives on the method tabs.
-        mod = data_access.load_data_json(ref_root, ctrl.k, "modularity_metrics.json")
-        ref_keys = ["modularity_all", "modularity_shared"]
-        if mod and any(kk in mod for kk in ref_keys):
-            _render_metrics(st, {kk: mod[kk] for kk in ref_keys if kk in mod})
-        else:
-            st.info("modularity_metrics.json not found for this K.")
+        if st.button(
+            "Set cell type names",
+            icon=":material/edit:",
+            key="ref_name_states",
+            help="Give the computed cell types names, used everywhere in the UI.",
+        ):
+            _state_names_dialog(adata_sc, ref_root, args.output_dir, ctrl.k)
+    with st.expander("Start clusters merged per cell type", expanded=True):
+        _plot_card(
+            render.render_start_cluster_merge_figure(adata_sc, ref_root, ctrl.k),
+            key="ref_start_cluster_merge",
+            stem=f"reference_start_cluster_merge_k{ctrl.k:03d}",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -1261,7 +1412,7 @@ def _validation_dialog(findings: "PairFindings") -> None:
     if findings.errors:
         st.markdown(
             "The selected pair violates the SpatialAIM input contract. You can continue, "
-            "but the sweep is likely to fail or to produce meaningless results."
+            "but the run is likely to fail or to produce meaningless results."
         )
     else:
         st.markdown(
@@ -1401,9 +1552,13 @@ def _sidebar() -> argparse.Namespace | None:
         # Group label for the method list: matches a Streamlit widget label
         # (0.875rem) so it lines up with 'Linkage method' above it.
         ".spatialaim-group-label{font-size:0.875rem;line-height:1.6;margin-bottom:0.25rem;}"
-        # White (theme background) like the inputs, not the grey sidebar surface.
+        # Theme background like the inputs, not the grey sidebar surface. There
+        # is no Streamlit CSS variable for it (--st-* only reaches custom-component
+        # shadow roots), but Streamlit sets `color-scheme` on the app root from the
+        # active theme, so light-dark() follows a theme switch without a rerun.
+        # The two values are Streamlit's default backgroundColor per mode.
         "div[class*='st-key-methods_box']{padding:0.5rem 0.75rem;"
-        "background-color:var(--background-color,#fff);}"
+        "background-color:light-dark(#ffffff,#0e1117);}"
         "div[class*='st-key-methods_box'] label{font-size:0.875rem;}"
         # Even rhythm inside the box: the container gap is 0, so every row's
         # spacing comes from these margins alone.
@@ -1588,6 +1743,64 @@ def _sidebar() -> argparse.Namespace | None:
     return settings
 
 
+@st.dialog("Feedback")
+def _feedback_dialog() -> None:
+    """Where to send ideas and bug reports — the tool has no in-app channel."""
+    st.markdown(
+        "We are happy about feedback to make this tool more useful to you! "
+        "If you have any ideas, wishes or you find a bug simply write a mail to "
+        "[dominik.pysch@fau.de](mailto:dominik.pysch@fau.de). Thank you!"
+    )
+    if st.button("Close", key="feedback_close"):
+        st.rerun()
+
+
+def _sidebar_footer() -> None:
+    """Feedback link at the very bottom of the sidebar.
+
+    Called from ``main`` rather than from ``_sidebar`` so it sits below both of
+    that function's exits — including the early one taken while the data paths
+    are still incomplete.
+
+    A ``tertiary`` button is borderless plain text, so this reads as a link, not
+    a control; the CSS only shrinks and dims it further, since it is a footnote
+    rather than part of the workflow.
+
+    Pinning it to the bottom edge takes a chain of stretches, because Streamlit
+    lays the sidebar out as static blocks sized to their content: the content
+    column has to fill the height left over by the sidebar header, its wrapper
+    and the root vertical block have to pass that height on, and only then does
+    ``margin-top:auto`` on this one element push it down. Streamlit's own
+    ``padding-bottom`` on the content column reserves ~96px that would otherwise
+    leave the link floating well above the edge, so it is cut to 1rem.
+    """
+    st.sidebar.markdown(
+        "<style>"
+        "div[data-testid='stSidebarContent']{display:flex;flex-direction:column;}"
+        "div[data-testid='stSidebarUserContent']{flex:1 0 auto;display:flex;"
+        "flex-direction:column;padding-bottom:1rem;}"
+        "div[data-testid='stSidebarUserContent']>div{display:flex;"
+        "flex-direction:column;flex:1 0 auto;}"
+        # Direct child only: the selector would otherwise stretch every nested
+        # vertical block (the methods card, the header button row) as well.
+        "div[data-testid='stSidebarUserContent']>div>div[data-testid='stVerticalBlock']"
+        "{flex:1 0 auto;}"
+        "div[class*='st-key-feedback_btn']{margin-top:auto;}"
+        "div[class*='st-key-feedback_btn'] button{opacity:0.5;}"
+        "div[class*='st-key-feedback_btn'] button:hover{opacity:1;}"
+        "div[class*='st-key-feedback_btn'] button p{font-size:0.8rem;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+    if st.sidebar.button(
+        "Feedback",
+        icon=":material/chat_bubble:",
+        type="tertiary",
+        key="feedback_btn",
+    ):
+        _feedback_dialog()
+
+
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
@@ -1713,6 +1926,7 @@ def _render_body(
 def main() -> None:
     st.set_page_config(page_title="SpatialAIM GUI", layout="wide")
     settings = _sidebar()
+    _sidebar_footer()
 
     if settings is None:
         st.title("SpatialAIM results explorer")

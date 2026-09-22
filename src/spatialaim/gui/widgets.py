@@ -18,6 +18,8 @@ datasets.
 handles state selection in the browser with no reruns: single click on a legend
 entry or any point toggles that state; double click isolates it (or restores
 all); inactive states are recoloured to a single light gray rather than hidden.
+It also rescales the marker sizes on zoom, so the dots can stay small enough for
+the dense spatial panel without vanishing when a region is zoomed into.
 
 ``linked_plot`` renders a Plotly figure client-side too, but links every figure
 in a group by K: hovering a point highlights the same K in all of them (browser
@@ -406,6 +408,62 @@ export default async function (component) {
     if (idx.length) Plotly.restyle(gd, { "marker.color": cols }, idx)
   }
 
+  // Marker sizes are in pixels, so zooming only spreads the points apart: a dot
+  // small enough that the dense spatial panel is not one solid blob at full
+  // extent stays a speck once zoomed in. Rescale each panel from its own zoom
+  // factor instead -- sublinear and capped, so zooming in makes the dots a
+  // little bigger, never blobs, and zooming out keeps the un-zoomed size.
+  // Panels are equal-aspect (y scaleanchored to x), so the x span alone is a
+  // faithful zoom measure.
+  const ZOOM_EXP = 0.6   // 4x zoom -> ~2.3x dots
+  const ZOOM_MIN = 1.0   // zooming out never shrinks below the base size
+  const ZOOM_MAX = 4.0
+
+  const axisOf = (tr) => (tr.xaxis || "x").replace("x", "xaxis")
+  const baseSizes = fig.data.map((tr) =>
+    tr.marker && typeof tr.marker.size === "number" ? tr.marker.size : null
+  )
+  // Un-zoomed span per axis, from the explicit ranges render.py pins.
+  const baseSpans = {}
+  fig.data.forEach((tr) => {
+    const ax = axisOf(tr)
+    const r = ((fig.layout || {})[ax] || {}).range
+    if (r && baseSpans[ax] === undefined) baseSpans[ax] = Math.abs(r[1] - r[0])
+  })
+
+  // Current ranges come from Plotly's resolved layout: the relayout payload only
+  // carries the keys that changed, and carries none on an autorange reset.
+  let sizing = false, lastSig = ""
+  const applySizes = () => {
+    if (sizing) return
+    const full = gd._fullLayout || {}
+    const idx = [], sizes = []
+    fig.data.forEach((tr, i) => {
+      const base = baseSizes[i]
+      const ax = axisOf(tr)
+      const span0 = baseSpans[ax]
+      const r = ((full[ax] || {}).range) || null
+      if (base === null || !span0 || !r) return
+      const span = Math.abs(r[1] - r[0])
+      const f = span > 0
+        ? Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.pow(span0 / span, ZOOM_EXP)))
+        : 1
+      idx.push(i)
+      sizes.push(base * f)
+    })
+    // Panning fires relayout without changing any span; skip the restyle then,
+    // so dragging a large Scattergl panel stays smooth.
+    const sig = sizes.join(",")
+    if (!idx.length || sig === lastSig) return
+    lastSig = sig
+    sizing = true
+    try {
+      Plotly.restyle(gd, { "marker.size": sizes }, idx)
+    } finally {
+      sizing = false
+    }
+  }
+
   const toggle = (s) => {
     const a = store[key].active
     if (a.has(s)) a.delete(s)
@@ -420,11 +478,14 @@ export default async function (component) {
   }
 
   applyColors()
+  applySizes()
 
   // Refresh the live context read by the (once-attached) event handlers.
-  gd.__aimCtx = { toggle, isolate, fig }
+  gd.__aimCtx = { toggle, isolate, applySizes, fig }
   if (!gd.__aimWired) {
     gd.__aimWired = true
+
+    gd.on("plotly_relayout", () => gd.__aimCtx.applySizes())
 
     // Legend already distinguishes single vs double (mutually exclusive events).
     gd.on("plotly_legendclick", (ev) => {

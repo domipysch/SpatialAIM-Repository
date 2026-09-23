@@ -1,0 +1,17 @@
+# R environment for curate_06_mouse_retina.py.
+#
+# Dataset 06_mouse-retina's scRNA counts are only distributed as an R
+# `qs`-serialised Seurat object, and qs has no Python reader, so one step of
+# that script runs dump_retina_counts.R here. Nothing else in spatial-aim needs
+# this env; create it only when rebuilding dataset 06.
+#
+#   conda env create -f environment_retina_qs.yml
+#
+# r-seuratobject is not required (the R script reads the slots with attr()).
+name: retina_qs_env
+channels:
+  - conda-forge
+dependencies:
+  - r-base
+  - r-qs        # read the .qs Seurat object
+  - r-matrix    # dgCMatrix + writeMM

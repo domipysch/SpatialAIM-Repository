@@ -51,7 +51,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-data = ["matplotlib>=3.9", "scikit-learn>=1.4"]
+data = ["matplotlib>=3.9", "scikit-learn>=1.4", "rdata>=1.1"]
 dev = [
     "pytest>=8",
     "black>=24",
@@ -75,6 +75,9 @@ where = ["src"]
 # Ship the reference-aligner env specs and the DOT R script alongside the package
 # so users can create the reference envs and the dot aligner can find its script.
 "spatialaim.reference_aligners" = ["*.yml", "*.R"]
+# curate_06_mouse_retina reads an R .qs object, so it ships an R script and the
+# env spec for the small R environment that runs it.
+"spatialaim.data.curate_datasets" = ["*.yml", "*.R"]
 
 [tool.setuptools_scm]
 # Version is derived from git tags (e.g. v0.1.0). Falls back to 0.0.0.dev* in a

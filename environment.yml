@@ -18,6 +18,7 @@ dependencies:
   - scanpy==1.11.5          # Leiden over-clustering, UMAP, analysis.biology
   # --- data preparation only ---
   - matplotlib==3.9.2
+  - rdata                   # read R .Rds sources (curate_datasets/curate_05_mouse_embryo)
   - pip:
     # --- core (pip-only) ---
     - igraph                # modularity (metrics.biology)

@@ -98,6 +98,15 @@ def save(output_dir: Path, k: int, names: dict[int, str]) -> None:
     tmp.replace(path)
 
 
+def set_name(output_dir: Path, k: int, state: int, name: str) -> None:
+    """Set (or, when blank, clear) one state's name at this K, keeping the
+    others -- the cell-type modal's write, through the same ``save`` as the
+    all-states naming dialog."""
+    names = load(output_dir, k)
+    names[int(state)] = name
+    save(output_dir, k, names)
+
+
 def label(state: int, names: dict[int, str] | None) -> str:
     """The display label for one computed cell type: its name, else ``Cell type n``."""
     name = (names or {}).get(int(state))

@@ -294,6 +294,195 @@ def _state_names_dialog(
         st.rerun()
 
 
+# Shown under the mapper tabs' headline plot (not the reference tab's UMAPs).
+_PLOT_CLICK_HINT = (
+    "**Left click:** Show / hide cell type · **Right click:** Inspect cell type"
+)
+
+
+# One decorated dialog per title, kept across runs: an open dialog is re-run as
+# a stored fragment (see ``_card_help_dialog``), so its function object must stay
+# the same from run to run; decorating anew on each call would rebuild it.
+_CELL_TYPE_DIALOGS: dict[str, Callable] = {}
+
+
+# Set when the modal saves a new name: the app reruns so every label (and the
+# modal's own title) picks the name up, and the plot that opened the modal
+# reopens it from this ``(origin, k, state)``.
+_CTDLG_REOPEN = "_ctdlg_reopen"
+
+
+def _cell_type_dialog(
+    adata_sc: "AnnData",
+    root: Path,
+    k: int,
+    state: int,
+    output_dir: Path,
+    spatial: "render.SpatialContext | None" = None,
+    *,
+    origin: str,
+) -> None:
+    """Open the cell-type modal for ``state``, titled with the type's name.
+    ``spatial`` (mapper tabs) adds the spatial rankings, maps and violins;
+    ``origin`` is the key of the plot that opened it (see ``_reopened_state``)."""
+    title = state_names.label(state, state_names.load(output_dir, k))
+    if title not in _CELL_TYPE_DIALOGS:
+        _CELL_TYPE_DIALOGS[title] = st.dialog(title, width="large")(
+            _cell_type_dialog_body
+        )
+    _CELL_TYPE_DIALOGS[title](adata_sc, root, k, state, output_dir, spatial, origin)
+
+
+def _reopened_state(origin: str, k: int) -> int | None:
+    """The state whose modal ``origin`` should reopen after a rename, if any."""
+    pending = st.session_state.get(_CTDLG_REOPEN)
+    if pending and pending[0] == origin and pending[1] == k:
+        del st.session_state[_CTDLG_REOPEN]
+        return int(pending[2])
+    return None
+
+
+# The modal's gene lists: (key, label, from the spatial ranking?, direction).
+_MARKER_LISTS = {
+    "up": ("↑ Upregulated", False, "up"),
+    "up_st": ("↑ Upregulated · ST", True, "up"),
+    "down": ("↓ Downregulated", False, "down"),
+    "down_st": ("↓ Downregulated · ST", True, "down"),
+}
+
+
+def _cell_type_dialog_body(
+    adata_sc: "AnnData",
+    root: Path,
+    k: int,
+    state: int,
+    output_dir: Path,
+    spatial: "render.SpatialContext | None",
+    origin: str,
+) -> None:
+    """The cell-type modal (right click on a cell type in a headline / reference
+    plot): a name field for the type (the same names the "Set cell type names"
+    dialog edits), a dropdown choosing one of the type's marker-gene lists (10 most up-
+    or downregulated in the reference and, in a mapper tab, among the spots
+    assigned to it), listed beneath it (click one to select it); for the
+    selected gene two all-gene reference UMAPs (the type highlighted; the gene's
+    expression), in a mapper tab the same two as spatial maps, and the gene's
+    distribution in the type vs. all other cells (and spots)."""
+    # "large" is too narrow for two UMAPs beside the gene list; widen only this
+    # dialog (matched through the keyed container inside it).
+    st.html(
+        "<style>div[role='dialog']:has(.st-key-ctdlg_root)"
+        "{width:min(1400px,95vw);max-width:95vw}</style>"
+    )
+    tables = {False: render.state_marker_table(adata_sc, root, k, state)}
+    if spatial is not None:
+        tables[True] = render.state_marker_table(
+            adata_sc, root, k, state, spatial=spatial
+        )
+    # The selection is per mapper too: the spatial lists depend on the mapping.
+    sel_key = f"ctdlg_sel_{root.name}_{k}_{state}"
+    if sel_key not in st.session_state:
+        first = next(
+            (r["gene"] for t in tables.values() if t for r in t["up"] + t["down"]),
+            None,
+        )
+        st.session_state[sel_key] = first
+    gene = st.session_state.get(sel_key)
+
+    def _select(g: str) -> None:
+        st.session_state[sel_key] = g
+
+    with st.container(key="ctdlg_root"):
+        left, right = st.columns([1, 4], gap="medium")
+        with left:
+            # The name sits above the gene list, in the same narrow column.
+            current = state_names.load(output_dir, k).get(int(state), "")
+            new_name = st.text_input(
+                "Cell type name",
+                value=current,
+                placeholder=f"Cell type {state}",
+                key=f"ctdlg_name_{k}_{state}",
+                help="Shared by every method at this K; leave empty for the "
+                "default label.",
+            )
+            if st.button(
+                "Save name",
+                icon=":material/edit:",
+                key=f"ctdlg_name_save_{k}_{state}",
+                disabled=new_name.strip() == current,
+                width="stretch",
+            ):
+                state_names.set_name(output_dir, k, state, new_name)
+                st.session_state[_CTDLG_REOPEN] = (origin, k, int(state))
+                st.rerun()
+            st.divider()
+            options = ["up", "up_st", "down", "down_st"] if spatial else ["up", "down"]
+            # Name the source on every entry once there are two of them.
+            labels = {
+                key: (lab if spatial is None or from_st else lab + " · scRNA")
+                for key, (lab, from_st, _d) in _MARKER_LISTS.items()
+            }
+            choice = st.selectbox(
+                "Marker genes",
+                options,
+                format_func=labels.get,
+                key=f"ctdlg_dir_{k}_{state}_{bool(spatial)}",
+                label_visibility="collapsed",
+            )
+            _lab, from_st, direction = _MARKER_LISTS[choice]
+            table = tables.get(from_st)
+            if table is None:
+                st.info(
+                    "No marker ranking for this cell type here (too few "
+                    + ("assigned spots)." if from_st else "cells).")
+                )
+            else:
+                if not table[direction]:
+                    st.caption("none")
+                for r in table[direction]:
+                    where = "assigned spots" if from_st else "cells"
+                    st.button(
+                        f"{r['gene']}  ({r['score']:+.1f})",
+                        key=f"ctdlg_{k}_{state}_{choice}_{r['gene']}",
+                        type="primary" if r["gene"] == gene else "tertiary",
+                        width="stretch",
+                        on_click=_select,
+                        args=(r["gene"],),
+                        help=f"Wilcoxon score {r['score']:+.1f} · log fold change "
+                        f"{r['lfc']:+.2f} · adjusted p {r['padj']:.1e} · "
+                        f"expressed in {r['frac']:.0%} of this type's {where}",
+                    )
+                st.caption(
+                    f"Shared genes, Wilcoxon vs. all other {where}; score in "
+                    "brackets."
+                )
+        with right:
+            # Row 1: the cell type (reference | spatial); row 2: the selected
+            # gene's expression on the same two maps; then its distributions.
+            st.plotly_chart(
+                render.render_cell_type_maps_figure(
+                    adata_sc, root, k, state, spatial=spatial
+                ),
+                width="stretch",
+                key="ctdlg_types",
+            )
+            if gene:
+                st.plotly_chart(
+                    render.render_gene_maps_figure(
+                        adata_sc, root, k, gene, spatial=spatial
+                    ),
+                    width="stretch",
+                    key="ctdlg_expr",
+                )
+                st.plotly_chart(
+                    render.render_gene_distribution_figure(
+                        adata_sc, root, k, state, gene, spatial=spatial
+                    ),
+                    width="stretch",
+                    key="ctdlg_violin",
+                )
+
+
 @st.dialog("About this card", width="large")
 def _card_help_dialog() -> None:
     """Modal explaining one report card.
@@ -447,6 +636,7 @@ def _headline(
             root=root,
             plot_confidence=plot_confidence,
             show_shared_umap=show_shared_umap,
+            st_path=str(args.stdata),
         )
     except Exception as exc:  # noqa: BLE001
         with plot_slot:
@@ -462,7 +652,23 @@ def _headline(
             plot_confidence=plot_confidence,
         )
     with plot_slot:
-        widgets.headline_plot(fig, key=f"{key_prefix}_headline")
+        origin = f"{key_prefix}_headline"
+        menu_state = widgets.headline_plot(
+            fig, key=origin, context_menu=adata_sc is not None
+        )
+        if menu_state is None:
+            menu_state = _reopened_state(origin, k)
+        if menu_state is not None and adata_sc is not None:
+            spatial = (
+                render.SpatialContext(str(args.stdata), hard, coords)
+                if have_spatial and len(hard) == len(coords)
+                else None
+            )
+            _cell_type_dialog(
+                adata_sc, root, k, menu_state, args.output_dir, spatial, origin=origin
+            )
+        if adata_sc is not None:
+            st.caption(_PLOT_CLICK_HINT)
         # stem carries the figure identity (K + threshold + confidence toggle) so
         # the export cache invalidates when any of them changes (see _export_popover).
         stem = f"{key_prefix}_k{k:03d}_thr{int(round(threshold * 100)):03d}"
@@ -1175,7 +1381,13 @@ def _reference_tab(
         return
 
     fig_umaps = render.render_reference_umaps_figure(adata_sc, ref_root, ctrl.k)
-    widgets.headline_plot(fig_umaps, key="ref_umaps")
+    menu_state = widgets.headline_plot(fig_umaps, key="ref_umaps", context_menu=True)
+    if menu_state is None:
+        menu_state = _reopened_state("ref_umaps", ctrl.k)
+    if menu_state is not None:
+        _cell_type_dialog(
+            adata_sc, ref_root, ctrl.k, menu_state, args.output_dir, origin="ref_umaps"
+        )
     _export_popover(
         fig_umaps, key="ref_umaps_exp", stem=f"reference_umaps_k{ctrl.k:03d}"
     )
@@ -1185,15 +1397,35 @@ def _reference_tab(
     )
 
     st.divider()
-    with st.expander("Cell type profiles", expanded=True):
-        fig_prof = render.render_state_profiles_figure(adata_sc, ref_root, ctrl.k)
-        if fig_prof is None:
-            st.info("Too few shared genes to plot the cell-type-profile heatmap.")
+    with st.expander("Cell type marker genes", expanded=False):
+        n_genes = st.number_input(
+            "Genes per cell type",
+            min_value=1,
+            max_value=25,
+            value=5,
+            step=1,
+            key="ref_markers_n",
+            help="Top-ranked shared genes shown per computed cell type "
+            "(scanpy rank_genes_groups, Wilcoxon, each type vs. the rest, on "
+            "the lognorm layer).",
+        )
+        fig_mk = render.render_state_markers_figure(
+            adata_sc, ref_root, ctrl.k, n_genes=int(n_genes)
+        )
+        if fig_mk is None:
+            st.info(
+                "Marker genes need at least two shared genes and two cell types "
+                "with two or more cells each."
+            )
         else:
             _plot_card(
-                fig_prof,
-                key="ref_profiles",
-                stem=f"reference_state_profiles_k{ctrl.k:03d}",
+                fig_mk,
+                key="ref_markers",
+                stem=f"reference_marker_genes_k{ctrl.k:03d}_n{int(n_genes)}",
+                caption="Dot size: fraction of the cell type's cells expressing "
+                "the gene. Colour: mean lognorm expression, scaled 0–1 per gene "
+                "across cell types. Hover for the Wilcoxon score, log fold "
+                "change and adjusted p-value.",
             )
         if st.button(
             "Set cell type names",
@@ -1202,7 +1434,7 @@ def _reference_tab(
             help="Give the computed cell types names, used everywhere in the UI.",
         ):
             _state_names_dialog(adata_sc, ref_root, args.output_dir, ctrl.k)
-    with st.expander("Start clusters merged per cell type", expanded=True):
+    with st.expander("Start clusters merged per cell type", expanded=False):
         _plot_card(
             render.render_start_cluster_merge_figure(adata_sc, ref_root, ctrl.k),
             key="ref_start_cluster_merge",

@@ -1,7 +1,7 @@
 """Figure production for the GUI.
 
 Every figure is an interactive Plotly object built here from data read straight
-off disk (each K's ``analysis/data`` folder) and, for the UMAP / profile /
+off disk (each K's ``analysis/data`` folder) and, for the UMAP / marker /
 fractions / merge-map views, the reference scaffold. The headline UMAP(s) +
 spatial map share a single state legend and are recoloured client-side; the
 spatial scatter in particular is rebuilt here on every confidence-threshold
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import plotly.graph_objects as go
@@ -30,13 +31,14 @@ from spatialaim.adata_schema import (
     OBSM_UMAP,
     OBSM_UMAP_SHARED_GENES,
     UNS_SHARED_GENES,
+    LAYER_LOGNORM,
 )
 from spatialaim.analysis.loading import (
     infer_cell_to_state_cluster,
     load_start_cluster_to_state,
 )
-from spatialaim.analysis.utils import to_dense
 
+from spatialaim.analysis.utils import to_dense
 from spatialaim.metrics import kselection as scores
 
 from . import data_access, state_names
@@ -380,7 +382,7 @@ def _add_umap_traces(
     dot_size: float,
     umap_key: str = OBSM_UMAP,
     equal_aspect: bool = True,
-    top_genes: dict[int, list[str]] | None = None,
+    top_genes: TopGenes | None = None,
     names: dict[int, str] | None = None,
 ) -> None:
     """Add a UMAP scatter (one trace per state) to subplot (``row``, ``col``).
@@ -480,7 +482,7 @@ def _add_spatial_traces(
     dot_size: float,
     plot_confidence: bool = False,
     equal_aspect: bool = True,
-    top_genes: dict[int, list[str]] | None = None,
+    top_genes: TopGenes | None = None,
     names: dict[int, str] | None = None,
 ) -> None:
     """Add the ST spatial scatter to subplot (``row``, ``col``).
@@ -618,6 +620,7 @@ def render_headline_figure(
     show_shared_umap: bool = False,
     dot_size_umap: float = 3.0,
     dot_size_spatial: float = 3.0,
+    st_path: str | None = None,
 ) -> go.Figure:
     """One interactive figure holding the UMAP(s) and the spatial map as
     side-by-side subplots that share a single state legend.
@@ -635,6 +638,9 @@ def render_headline_figure(
     ``dot_size_*`` are the *un-zoomed* marker sizes. ``widgets.headline_plot``
     grows them again as a panel is zoomed into, so these are the sizes that apply
     at full extent and in a static export.
+
+    With ``st_path`` (the ST file) every hover box also names the state's top
+    spatial marker genes, ranked over the spots ``hard`` assigns to it.
     """
     palette = state_palette(k)
     have_umap = adata_sc is not None and root is not None
@@ -690,7 +696,14 @@ def render_headline_figure(
     col = 1
     # Every panel's hover box names the state's most enriched genes; needs the
     # scaffold, so it is empty (and the hover unchanged) on a spatial-only figure.
-    top_genes = top_genes_per_state(adata_sc if have_umap else None, root, k)
+    spatial = (
+        SpatialContext(st_path, np.asarray(hard), coords)
+        if st_path is not None and have_spatial and len(hard) == len(coords)
+        else None
+    )
+    top_genes = top_genes_per_state(
+        adata_sc if have_umap else None, root, k, spatial=spatial
+    )
     names = _names_for(root, k)
     # Each adder pins its own subplot axes.
     if have_shared:
@@ -1198,118 +1211,716 @@ def render_start_cluster_merge_figure(
     return fig
 
 
-@st.cache_data(show_spinner=False)
-def _state_profiles(_adata_sc, root_str: str, k: int):
-    """Per-state mean expression over the shared genes, z-scored per gene across
-    states — genes ordered by decreasing scRNA variance.
+def _rank_markers(X, labels: np.ndarray, genes: list[str]) -> dict | None:
+    """Marker genes per label: scanpy ``rank_genes_groups`` (Wilcoxon, each label
+    vs. the rest) over the columns of ``X`` (lognorm, observations x ``genes``)
+    — the scanpy clustering tutorial's recipe.
 
-    Returns ``{"z", "genes", "states"}`` or ``None`` when fewer than two shared
-    genes are present. Cached on ``(root, k)`` because both the profile heatmap
-    and the hover boxes' top genes read it, and it is an O(cells x genes) pass;
-    ``_adata_sc`` leads with an underscore so ``st.cache_data`` does not hash the
-    scaffold (it is the stable, resource-cached one for this run root).
+    Returns ``{"genes", "states", "ranked", "score", "lfc", "padj", "mean",
+    "frac"}`` or ``None`` when fewer than two testable labels (>= 2 observations
+    each) exist. ``ranked`` maps each tested label to gene indices by decreasing
+    score; ``score``/``lfc``/``padj`` are (labels x genes), NaN for an untested
+    label; ``mean`` (mean lognorm, zeros included) and ``frac`` (fraction > 0)
+    feed the dotplot.
+    """
+    import pandas as pd
+    import scanpy as sc
+
+    labels = np.asarray(labels).astype(int)
+    states = sorted(np.unique(labels).tolist())
+    counts = {s: int((labels == s).sum()) for s in states}
+    # rank_genes_groups needs >= 2 observations per tested group and >= 2 groups.
+    tested = [s for s in states if counts[s] >= 2]
+    if len(tested) < 2:
+        return None
+
+    adata = AnnData(
+        X=X.copy(),
+        obs=pd.DataFrame({"state": pd.Categorical([str(s) for s in labels])}),
+    )
+    adata.obs_names = [str(i) for i in range(adata.n_obs)]
+    adata.var_names = genes
+    adata.uns["log1p"] = {"base": None}  # natural-log lognorm, for the fold changes
+    sc.tl.rank_genes_groups(
+        adata,
+        groupby="state",
+        groups=[str(s) for s in tested],
+        reference="rest",
+        method="wilcoxon",
+        n_genes=len(genes),
+    )
+
+    gene_idx = {g: j for j, g in enumerate(genes)}
+    shape = (len(states), len(genes))
+    score, lfc, padj = (np.full(shape, np.nan) for _ in range(3))
+    ranked: dict[int, list[int]] = {}
+    for i, s in enumerate(states):
+        if s not in tested:
+            continue
+        df = sc.get.rank_genes_groups_df(adata, group=str(s))
+        cols = df["names"].map(gene_idx).to_numpy()
+        score[i, cols] = df["scores"].to_numpy()
+        lfc[i, cols] = df["logfoldchanges"].to_numpy()
+        padj[i, cols] = df["pvals_adj"].to_numpy()
+        ranked[s] = cols.tolist()  # already sorted by decreasing score
+
+    mean = np.zeros(shape)
+    frac = np.zeros(shape)
+    for i, s in enumerate(states):
+        block = X[labels == s]
+        mean[i] = np.asarray(block.mean(axis=0)).ravel()
+        frac[i] = np.asarray((block > 0).mean(axis=0)).ravel()
+
+    return {
+        "genes": genes,
+        "states": states,
+        "ranked": ranked,
+        "score": score,
+        "lfc": lfc,
+        "padj": padj,
+        "mean": mean,
+        "frac": frac,
+    }
+
+
+def _shared_genes(adata_sc: AnnData) -> list[str]:
+    """The scaffold's shared genes (scRNA ∩ ST), in their stored order."""
+    shared = list(adata_sc.uns.get(UNS_SHARED_GENES, []))
+    return [g for g in shared if g in adata_sc.var_names]
+
+
+@st.cache_data(show_spinner="Ranking marker genes…")
+def _state_markers(_adata_sc, root_str: str, k: int):
+    """Reference marker genes per computed cell type (``_rank_markers``) over the
+    shared genes, on the all-gene lognorm layer. ``None`` when fewer than two
+    shared genes or testable cell types exist. Cached on ``(root, k)`` because
+    the dotplot, the modal and every panel's hover read it; ``_adata_sc`` leads
+    with an underscore so ``st.cache_data`` does not hash the scaffold (it is the
+    stable, resource-cached one for this run root).
     """
     start_cluster_to_state = load_start_cluster_to_state(
         data_access.k_dir(Path(root_str), k)
     )
     infer_cell_to_state_cluster(_adata_sc, start_cluster_to_state)
     cell_states = _adata_sc.obs[OBS_COMPUTED_STATE].astype(int).to_numpy()
-
-    shared_genes = list(_adata_sc.uns.get(UNS_SHARED_GENES, []))
-    available = [g for g in shared_genes if g in _adata_sc.var_names]
-    if len(available) < 2:
+    genes = _shared_genes(_adata_sc)
+    if len(genes) < 2:
         return None
+    return _rank_markers(_adata_sc[:, genes].layers[LAYER_LOGNORM], cell_states, genes)
 
-    X = to_dense(_adata_sc[:, available])
-    gene_names = np.array(available)
-    gene_order = np.argsort(X.var(axis=0))[::-1]
 
-    unique_states = sorted(np.unique(cell_states).tolist())
-    mat = np.stack(
-        [X[cell_states == s][:, gene_order].mean(axis=0) for s in unique_states]
+class SpatialContext(NamedTuple):
+    """What the spatial side of the hover / cell-type modal needs: the ST file
+    (for its expression), this mapper's per-spot hard assignment at this K, and
+    the spot coordinates (``None`` when the ST file has none)."""
+
+    st_path: str
+    hard: np.ndarray
+    coords: np.ndarray | None
+
+
+@st.cache_resource(show_spinner="Loading spatial expression…")
+def _spatial_lognorm(st_path_str: str, genes: tuple[str, ...]):
+    """ST lognorm over ``genes`` (see ``data_access.load_spatial_lognorm``),
+    loaded once per ST file and gene set."""
+    return data_access.load_spatial_lognorm(Path(st_path_str), list(genes))
+
+
+@st.cache_data(show_spinner="Ranking spatial marker genes…")
+def _spatial_state_markers(_adata_sc, _hard, root_str: str, k: int, st_path_str: str):
+    """Spatial marker genes per *assigned* cell type (``_rank_markers`` on the ST
+    lognorm, grouped by this mapper's hard assignment) over the shared genes.
+    ``None`` when the ranking is impossible or the assignment does not match the
+    ST file's spots. Cached on ``(root, k, st_path)``, which fix ``_hard``.
+    """
+    genes = _shared_genes(_adata_sc)
+    if len(genes) < 2:
+        return None
+    X = _spatial_lognorm(st_path_str, tuple(genes))
+    if X.shape[0] != len(_hard):
+        logger.warning(
+            "Spatial markers skipped: %d spots in %s but %d assignments.",
+            X.shape[0],
+            st_path_str,
+            len(_hard),
+        )
+        return None
+    return _rank_markers(X, _hard, genes)
+
+
+def _markers(
+    adata_sc: AnnData, root: Path, k: int, spatial: SpatialContext | None
+) -> dict | None:
+    """The reference ranking, or the spatial one when ``spatial`` is given."""
+    if spatial is None:
+        return _state_markers(adata_sc, str(root), int(k))
+    return _spatial_state_markers(
+        adata_sc, spatial.hard, str(root), int(k), spatial.st_path
     )
-    col_std = mat.std(axis=0)
-    col_std[col_std == 0] = 1.0
-    return {
-        "z": (mat - mat.mean(axis=0)) / col_std,
-        "genes": gene_names[gene_order].tolist(),
-        "states": unique_states,
-    }
+
+
+def _up_down(mk: dict, state: int, n: int) -> tuple[list[int], list[int]]:
+    """Gene indices of ``state``'s ``n`` most up- (positive score, highest first)
+    and downregulated (negative score, lowest first) genes in ranking ``mk``."""
+    cols = mk["ranked"][state]
+    row = mk["score"][mk["states"].index(state)]
+    up = [j for j in cols if row[j] > 0][:n]
+    down = [j for j in reversed(cols) if row[j] < 0][:n]
+    return up, down
+
+
+# Per state: its top-ranked marker genes for the hover box, keyed "up"/"down"
+# (reference) and "up_st"/"down_st" (spatial, mapper tabs only).
+TopGenes = dict[int, dict[str, list[str]]]
 
 
 def top_genes_per_state(
-    adata_sc: AnnData | None, root: Path | None, k: int, n: int = 3
-) -> dict[int, list[str]]:
-    """The ``n`` genes a state is most enriched for, highest z-score first.
+    adata_sc: AnnData | None,
+    root: Path | None,
+    k: int,
+    n: int = 3,
+    *,
+    spatial: SpatialContext | None = None,
+) -> TopGenes:
+    """Per state, the ``n`` most up- and downregulated marker genes (Wilcoxon vs.
+    rest) in the reference and, with ``spatial``, among the ST spots assigned to
+    it: ``{state: {"up", "down"[, "up_st", "down_st"]: [...]}}``.
 
-    Same z-scores the profile heatmap shows (per gene across states), so a state's
-    hover box names the genes that make its row light up there. Empty when the
-    scaffold or the profiles are unavailable — callers then simply show no genes.
+    Up genes need a positive score, down genes a negative one, most extreme
+    first. Empty when the scaffold or the ranking is unavailable — callers then
+    simply show no genes; a state too small to test is left out.
     """
     if adata_sc is None or root is None:
         return {}
-    prof = _state_profiles(adata_sc, str(root), int(k))
-    if prof is None:
-        return {}
-    genes, z = prof["genes"], prof["z"]
-    return {
-        int(s): [genes[j] for j in np.argsort(z[i])[::-1][:n]]
-        for i, s in enumerate(prof["states"])
-    }
+    out: TopGenes = {}
+    sources = [("", None)] + ([("_st", spatial)] if spatial is not None else [])
+    for suffix, ctx in sources:
+        mk = _markers(adata_sc, root, k, ctx)
+        if mk is None:
+            continue
+        for s in mk["ranked"]:
+            up, down = _up_down(mk, s, n)
+            hits = out.setdefault(int(s), {})
+            hits["up" + suffix] = [mk["genes"][j] for j in up]
+            hits["down" + suffix] = [mk["genes"][j] for j in down]
+    return out
 
 
-def _top_genes_suffix(top_genes: dict[int, list[str]] | None, state: int) -> str:
-    """``<br>Top genes: A, B, C`` for a state's hover box, or '' if unknown."""
-    hits = (top_genes or {}).get(int(state))
-    return f"<br>Top genes: {', '.join(hits)}" if hits else ""
+def _top_genes_suffix(top_genes: TopGenes | None, state: int) -> str:
+    """The hover box's marker lines for ``state``: ``↑ A, B, C`` / ``↓ D, E, F``
+    from the reference, or — when the figure carries spatial rankings — four
+    lines ``↑ scRNA``, ``↑ ST``, ``↓ scRNA``, ``↓ ST``. Empty lists are left out;
+    '' when the state is unknown."""
+    top_genes = top_genes or {}
+    hits = top_genes.get(int(state)) or {}
+    has_st = any("up_st" in v for v in top_genes.values())
+    lines = (
+        (
+            ("up", "↑ scRNA:"),
+            ("up_st", "↑ ST:"),
+            ("down", "↓ scRNA:"),
+            ("down_st", "↓ ST:"),
+        )
+        if has_st
+        else (("up", "↑"), ("down", "↓"))
+    )
+    return "".join(
+        f"<br>{label} {', '.join(hits[key])}" for key, label in lines if hits.get(key)
+    )
 
 
-def render_state_profiles_figure(
-    adata_sc: AnnData, root: Path, k: int
+# Largest dot diameter (px) of the marker dotplot; a dot's *area* is proportional
+# to the fraction of the row's cells expressing the gene, as in scanpy's dotplot.
+_DOT_MAX_PX = 16.0
+# Colourbar length (px) and the margins of the dotplot; the size legend is placed
+# below the colourbar in pixels, so the two never overlap whatever the height.
+_COLORBAR_PX = 150
+# Vertical room (px) for the size legend: its title plus five entries.
+_SIZE_LEGEND_PX = 150
+_DOTPLOT_MARGIN = dict(l=10, r=10, t=24, b=90)
+
+
+def render_state_markers_figure(
+    adata_sc: AnnData, root: Path, k: int, *, n_genes: int = 5
 ) -> go.Figure | None:
-    """Heatmap of per-state mean expression over the shared genes (sorted by SC
-    variance, z-scored per gene across states). Returns ``None`` when too few
-    shared genes are present to plot.
+    """Dotplot of each computed cell type's top ``n_genes`` marker genes
+    (``rank_genes_groups``, Wilcoxon vs. rest, shared genes), in the style of
+    scanpy's ``rank_genes_groups_dotplot(standard_scale="var")``.
 
-    Each row label is prefixed with the state's colour from the shared palette, so
-    a row can be tied back to the UMAP and spatial panels above without counting.
+    Rows are cell types; columns are each tested type's markers in turn (a gene
+    can recur under several types), grouped under a bar in that type's colour.
+    Dot area = fraction of the row's cells expressing the gene; dot colour = the
+    row's mean lognorm expression, min-max scaled per gene across rows. Returns
+    ``None`` when the ranking is unavailable (see ``_state_markers``).
     """
-    prof = _state_profiles(adata_sc, str(root), int(k))
-    if prof is None:
+    mk = _state_markers(adata_sc, str(root), int(k))
+    if mk is None:
         return None
-    unique_states = prof["states"]
-
+    states, genes = mk["states"], mk["genes"]
+    names = _names_for(root, k)
     palette = state_palette(k)
-    fig = go.Figure(
-        go.Heatmap(
-            z=prof["z"],
-            x=prof["genes"],
-            # Plotly renders a <span style="color:..."> in tick labels, which is
-            # the only way to colour one tick differently from the next. The dot
-            # is set in px (not em, which Plotly's text renderer ignores) a few
-            # steps above the 13px tick font, so it reads as a swatch.
-            y=[
-                f'<span style="color:{_hex(palette.get(s))};font-size:22px">●</span>'
-                f" {_state_label(s, _names_for(root, k))}"
-                for s in unique_states
-            ],
-            colorscale="Viridis",
-            colorbar=dict(title="z-score", thickness=12),
-            hovertemplate="%{y}<br>%{x}<br>z %{z:.2f}<extra></extra>",
+
+    # Columns: per tested state (in state order) its top n genes.
+    col_genes: list[int] = []
+    blocks: list[tuple[int, int, int]] = []  # (state, first col, last col)
+    for s in states:
+        cols = mk["ranked"].get(s, [])[:n_genes]
+        if cols:
+            blocks.append((s, len(col_genes), len(col_genes) + len(cols) - 1))
+            col_genes += cols
+    gcols = np.asarray(col_genes)
+
+    mean = mk["mean"][:, gcols]
+    lo, hi = mean.min(axis=0), mean.max(axis=0)
+    span = np.where(hi > lo, hi - lo, 1.0)
+    scaled = (mean - lo) / span
+    frac = mk["frac"][:, gcols]
+
+    row_labels = [
+        f'<span style="color:{_hex(palette.get(s))};font-size:22px">●</span>'
+        f" {_state_label(s, names)}"
+        for s in states
+    ]
+    n_rows, n_cols = len(states), len(col_genes)
+    xs = np.tile(np.arange(n_cols), n_rows)
+    ys = np.repeat(np.arange(n_rows), n_cols)
+    # Per-dot hover fields; object dtype keeps the labels as strings.
+    custom = np.empty((n_rows * n_cols, 7), dtype=object)
+    custom[:, 0] = np.repeat([_state_label(s, names) for s in states], n_cols)
+    custom[:, 1] = np.tile([genes[j] for j in col_genes], n_rows)
+    custom[:, 2] = frac.ravel()
+    custom[:, 3] = mean.ravel()
+    custom[:, 4] = mk["score"][:, gcols].ravel()
+    custom[:, 5] = mk["lfc"][:, gcols].ravel()
+    custom[:, 6] = mk["padj"][:, gcols].ravel()
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=xs,
+            y=ys,
+            mode="markers",
+            marker=dict(
+                # Diameter ~ sqrt(frac) so the dot *area* tracks the fraction.
+                size=_DOT_MAX_PX * np.sqrt(frac.ravel()),
+                color=scaled.ravel(),
+                colorscale="Reds",
+                cmin=0.0,
+                cmax=1.0,
+                line=dict(width=0.5, color="rgba(80,80,80,0.6)"),
+                colorbar=dict(
+                    title=dict(text="Mean expr.<br>(scaled)", side="top"),
+                    thickness=12,
+                    lenmode="pixels",
+                    len=_COLORBAR_PX,
+                    y=1.0,
+                    yanchor="top",
+                ),
+            ),
+            customdata=custom,
+            hovertemplate=(
+                "%{customdata[0]}<br><b>%{customdata[1]}</b>"
+                "<br>expressed in %{customdata[2]:.0%} of cells"
+                "<br>mean lognorm %{customdata[3]:.2f}"
+                "<br>score %{customdata[4]:.1f} · logFC %{customdata[5]:.2f}"
+                " · p_adj %{customdata[6]:.1e}<extra></extra>"
+            ),
+            showlegend=False,
         )
     )
-    n_states = len(unique_states)
+    # Size key: invisible points that only draw legend entries.
+    for f in (0.2, 0.4, 0.6, 0.8, 1.0):
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(
+                    size=_DOT_MAX_PX * np.sqrt(f), color="#888", line=dict(width=0)
+                ),
+                name=f"{f:.0%}",
+                hoverinfo="skip",
+            )
+        )
+    # One bar per state's marker block, in the state's colour, above the dots.
+    for s, a, b in blocks:
+        fig.add_shape(
+            type="line",
+            xref="x",
+            yref="paper",
+            x0=a - 0.35,
+            x1=b + 0.35,
+            y0=1.03,
+            y1=1.03,
+            line=dict(color=_hex(palette.get(s)), width=5),
+        )
+
+    margins = _DOTPLOT_MARGIN["t"] + _DOTPLOT_MARGIN["b"]
+    height = max(n_rows * 30 + 190, margins + _COLORBAR_PX + 30 + _SIZE_LEGEND_PX)
+    plot_px = height - _DOTPLOT_MARGIN["t"] - _DOTPLOT_MARGIN["b"]
     _base_layout(
         fig,
-        height=max(240, n_states * 42 + 160),
-        xaxis_title="Gene",
-        yaxis_title="Computed cell type",
+        height=height,
+        xaxis=dict(
+            tickmode="array",
+            tickvals=list(range(n_cols)),
+            ticktext=[genes[j] for j in col_genes],
+            tickangle=-90,
+            range=[-0.7, n_cols - 0.3],
+            showgrid=False,
+            zeroline=False,
+        ),
+        yaxis=dict(
+            tickmode="array",
+            tickvals=list(range(n_rows)),
+            ticktext=row_labels,
+            # State 0 on top.
+            range=[n_rows - 0.5, -0.5],
+            showgrid=False,
+            zeroline=False,
+            title="Computed cell type",
+        ),
+        legend=dict(
+            title=dict(text="Fraction of cells<br>in group"),
+            itemsizing="trace",
+            x=1.02,
+            xanchor="left",
+            y=1.0 - (_COLORBAR_PX + 30) / plot_px,
+            yanchor="top",
+        ),
         # No title: the card header above the figure already names it.
-        margin=dict(l=10, r=10, t=10, b=80),
+        margin=_DOTPLOT_MARGIN,
     )
-    # State 0 on top.
-    fig.update_yaxes(autorange="reversed")
     return fig
+
+
+# --------------------------------------------------------------------------- #
+# Cell-type modal (right click on a state in the headline / reference UMAPs)
+# --------------------------------------------------------------------------- #
+def state_marker_table(
+    adata_sc: AnnData,
+    root: Path,
+    k: int,
+    state: int,
+    n: int = 10,
+    *,
+    spatial: SpatialContext | None = None,
+) -> dict[str, list[dict]] | None:
+    """The ``n`` most up- and downregulated marker genes of ``state``, with their
+    Wilcoxon statistics: ``{"up": [...], "down": [...]}``, each row a dict of
+    ``gene``/``score``/``lfc``/``padj``/``frac`` (fraction of the state's cells
+    — or, with ``spatial``, its assigned spots — expressing the gene). From the
+    reference ranking, or the spatial one when ``spatial`` is given. ``None``
+    when the state was not ranked there.
+    """
+    mk = _markers(adata_sc, root, k, spatial)
+    if mk is None or int(state) not in mk["ranked"]:
+        return None
+    i = mk["states"].index(int(state))
+    up, down = _up_down(mk, int(state), n)
+
+    def row(j: int) -> dict:
+        return {
+            "gene": mk["genes"][j],
+            "score": float(mk["score"][i, j]),
+            "lfc": float(mk["lfc"][i, j]),
+            "padj": float(mk["padj"][i, j]),
+            "frac": float(mk["frac"][i, j]),
+        }
+
+    return {"up": [row(j) for j in up], "down": [row(j) for j in down]}
+
+
+@st.cache_data(show_spinner=False)
+def _gene_expression(_adata_sc, root_str: str, gene: str) -> np.ndarray:
+    """Per-cell lognorm expression of ``gene`` (all-gene layer), cached per run
+    root (one scaffold each) and gene."""
+    return to_dense(_adata_sc[:, gene].layers[LAYER_LOGNORM]).ravel()
+
+
+def _spatial_gene_expression(
+    adata_sc: AnnData, spatial: SpatialContext, gene: str
+) -> np.ndarray | None:
+    """Per-spot ST lognorm expression of ``gene``, or ``None`` if it is not a
+    shared gene."""
+    genes = _shared_genes(adata_sc)
+    if gene not in genes:
+        return None
+    X = _spatial_lognorm(spatial.st_path, tuple(genes))
+    return to_dense(X[:, genes.index(gene)]).ravel()
+
+
+# The "every other point" backdrop of the modal's highlight panels: lighter than
+# ``_GREY_RGBA`` so even the pale tab20 state colours stand out against it.
+_BACKDROP_GREY = "#e4e4e4"
+# Lognorm 0 is drawn light grey so expressing cells stand out, then reds.
+_EXPR_SCALE = [[0.0, "#e3e3e3"], [0.02, "#fcbba1"], [0.5, "#ef3b2c"], [1.0, "#67000d"]]
+
+
+class _MapPanel(NamedTuple):
+    """One scatter panel of the cell-type modal: its points, which of them are
+    highlighted (or their expression), and how its axes are styled."""
+
+    title: str
+    coords: np.ndarray
+    values: np.ndarray  # bool "in this cell type" mask, or per-point expression
+    axis_titles: tuple[str, str]
+    reversed_y: bool
+
+
+def _modal_coords(
+    adata_sc: AnnData,
+    root: Path,
+    k: int,
+    spatial: SpatialContext | None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """The reference UMAP coordinates and per-cell states, plus the spot
+    coordinates when ``spatial`` carries them (else ``None``)."""
+    data = _umap_panel_data(adata_sc, str(root), int(k), OBSM_UMAP, False)
+    spot_coords = (
+        np.asarray(spatial.coords)
+        if spatial is not None and spatial.coords is not None
+        else None
+    )
+    return data, spot_coords
+
+
+def _map_row_figure(
+    panels: list[_MapPanel], *, color: str | None, dot_size: float
+) -> go.Figure:
+    """One row of equal-aspect scatter panels. With ``color`` each panel's
+    ``values`` is a mask drawn in that colour over every other point in grey;
+    without, ``values`` is an expression colouring every point (highest drawn on
+    top so expressing points are never buried), each panel with its own
+    colourbar beside it, since the two normalisations are not on one scale."""
+    fig = make_subplots(
+        rows=1,
+        cols=len(panels),
+        subplot_titles=[p.title for p in panels],
+        horizontal_spacing=0.12,
+    )
+    for col, p in enumerate(panels, start=1):
+        if color is not None:
+            for mask, c in ((~p.values, _BACKDROP_GREY), (p.values, color)):
+                fig.add_trace(
+                    go.Scattergl(
+                        x=p.coords[mask, 0],
+                        y=p.coords[mask, 1],
+                        mode="markers",
+                        marker=dict(size=dot_size, color=c),
+                        hoverinfo="skip",
+                        showlegend=False,
+                    ),
+                    row=1,
+                    col=col,
+                )
+        else:
+            order = np.argsort(p.values, kind="stable")
+            domain = fig.layout["xaxis" if col == 1 else f"xaxis{col}"].domain
+            fig.add_trace(
+                go.Scattergl(
+                    x=p.coords[order, 0],
+                    y=p.coords[order, 1],
+                    mode="markers",
+                    marker=dict(
+                        size=dot_size,
+                        color=p.values[order],
+                        colorscale=_EXPR_SCALE,
+                        cmin=0.0,
+                        cmax=float(p.values.max()) or 1.0,
+                        colorbar=dict(
+                            title="lognorm",
+                            thickness=12,
+                            len=0.8,
+                            x=domain[1] + 0.01,
+                            xanchor="left",
+                        ),
+                    ),
+                    hovertemplate="%{marker.color:.2f}<extra></extra>",
+                    showlegend=False,
+                ),
+                row=1,
+                col=col,
+            )
+        _style_scatter_axes(
+            fig,
+            row=1,
+            col=col,
+            xref="x" if col == 1 else f"x{col}",
+            coords=p.coords,
+            xtitle=p.axis_titles[0],
+            ytitle=p.axis_titles[1],
+            equal_aspect=True,
+            reversed_y=p.reversed_y,
+            hide_ticks=True,
+        )
+    return _base_layout(fig, height=430, margin=dict(l=10, r=10, t=40, b=10))
+
+
+def render_cell_type_maps_figure(
+    adata_sc: AnnData,
+    root: Path,
+    k: int,
+    state: int,
+    *,
+    spatial: SpatialContext | None = None,
+    dot_size: float = 3.0,
+) -> go.Figure:
+    """The modal's first row: ``state`` in its colour over every other cell in
+    grey on the all-gene reference UMAP and, with ``spatial``, the spots this
+    mapper assigned to it on the spatial map."""
+    data, spot_coords = _modal_coords(adata_sc, root, k, spatial)
+    label = _state_label(state, _names_for(root, k))
+    panels = [
+        _MapPanel(
+            f"Reference — {label}",
+            data["coords"],
+            data["states"] == int(state),
+            ("UMAP1", "UMAP2"),
+            False,
+        )
+    ]
+    if spot_coords is not None:
+        panels.append(
+            _MapPanel(
+                f"Spatial map — {label}",
+                spot_coords,
+                np.asarray(spatial.hard) == int(state),
+                ("x", "y"),
+                True,
+            )
+        )
+    return _map_row_figure(
+        panels, color=_hex(state_palette(k).get(int(state))), dot_size=dot_size
+    )
+
+
+def render_gene_maps_figure(
+    adata_sc: AnnData,
+    root: Path,
+    k: int,
+    gene: str,
+    *,
+    spatial: SpatialContext | None = None,
+    dot_size: float = 3.0,
+) -> go.Figure:
+    """The modal's second row: every cell coloured by its lognorm expression of
+    ``gene`` on the all-gene reference UMAP and, with ``spatial``, every spot by
+    its ST lognorm expression on the spatial map."""
+    data, spot_coords = _modal_coords(adata_sc, root, k, spatial)
+    panels = [
+        _MapPanel(
+            f"Reference — {gene} expression (lognorm)",
+            data["coords"],
+            _gene_expression(adata_sc, str(root), gene),
+            ("UMAP1", "UMAP2"),
+            False,
+        )
+    ]
+    st_expr = (
+        _spatial_gene_expression(adata_sc, spatial, gene)
+        if spot_coords is not None
+        else None
+    )
+    if st_expr is not None:
+        panels.append(
+            _MapPanel(
+                f"Spatial — {gene} expression (lognorm)",
+                spot_coords,
+                st_expr,
+                ("x", "y"),
+                True,
+            )
+        )
+    return _map_row_figure(panels, color=None, dot_size=dot_size)
+
+
+# Cells per group handed to the browser for the violin's density estimate; a
+# larger group is subsampled (fixed seed), which leaves the shape unchanged.
+_VIOLIN_MAX_CELLS = 20000
+
+
+def _add_violin(
+    fig: go.Figure, vals: np.ndarray, name: str, color: str, rng, *, col: int
+) -> None:
+    """One violin (box + mean line) of ``vals`` in subplot column ``col``, with
+    the group's size and fraction of non-zero values under its label."""
+    if vals.size == 0:
+        return
+    frac = float((vals > 0).mean())
+    shown = (
+        rng.choice(vals, _VIOLIN_MAX_CELLS, replace=False)
+        if vals.size > _VIOLIN_MAX_CELLS
+        else vals
+    )
+    fig.add_trace(
+        go.Violin(
+            y=shown,
+            name=f"{name}<br>n = {vals.size:,} · {frac:.0%} expressing",
+            line_color=color,
+            fillcolor=color,
+            opacity=0.75,
+            box=dict(
+                visible=True,
+                width=0.12,
+                fillcolor="white",
+                line=dict(color="#333333", width=1.5),
+            ),
+            meanline=dict(visible=True, color="#333333", width=1.5),
+            points=False,
+            spanmode="hard",
+            showlegend=False,
+            hoverinfo="y",
+        ),
+        row=1,
+        col=col,
+    )
+
+
+def render_gene_distribution_figure(
+    adata_sc: AnnData,
+    root: Path,
+    k: int,
+    state: int,
+    gene: str,
+    *,
+    spatial: SpatialContext | None = None,
+) -> go.Figure:
+    """Violins of ``gene``'s lognorm expression in ``state`` vs. all other cells
+    of the reference and, with ``spatial``, in the spots assigned to ``state`` vs.
+    all other spots — side by side, each on its own y-axis since the two
+    normalisations are not on a common scale."""
+    data = _umap_panel_data(adata_sc, str(root), int(k), OBSM_UMAP, False)
+    label = _state_label(state, _names_for(root, k))
+    color = _hex(state_palette(k).get(int(state)))
+    rng = np.random.default_rng(0)
+    st_expr = (
+        _spatial_gene_expression(adata_sc, spatial, gene)
+        if spatial is not None
+        else None
+    )
+
+    n_cols = 2 if st_expr is not None else 1
+    fig = make_subplots(
+        rows=1,
+        cols=n_cols,
+        subplot_titles=[
+            "Distribution in scRNA reference cells",
+            "Distribution in cells of spatial data",
+        ][:n_cols],
+        horizontal_spacing=0.1,
+    )
+    inside = data["states"] == int(state)
+    expr = _gene_expression(adata_sc, str(root), gene)
+    _add_violin(fig, expr[inside], label, color, rng, col=1)
+    _add_violin(fig, expr[~inside], "All other cells", "#9e9e9e", rng, col=1)
+    fig.update_yaxes(title_text=f"{gene} (lognorm)", row=1, col=1)
+    if st_expr is not None:
+        on = np.asarray(spatial.hard) == int(state)
+        _add_violin(fig, st_expr[on], label, color, rng, col=2)
+        _add_violin(fig, st_expr[~on], "All other spots", "#9e9e9e", rng, col=2)
+        fig.update_yaxes(title_text=f"{gene} (lognorm)", row=1, col=2)
+    return _base_layout(fig, height=360, margin=dict(l=10, r=10, t=40, b=10))
 
 
 # --------------------------------------------------------------------------- #

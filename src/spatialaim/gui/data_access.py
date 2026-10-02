@@ -206,6 +206,19 @@ def load_spatial_coords(st_path: Path) -> np.ndarray | None:
             adata.file.close()
 
 
+def load_spatial_lognorm(st_path: Path, genes: list[str]):
+    """ST expression over ``genes`` (in that order) as a CSR float32 matrix
+    (n_spots x len(genes)), normalised the way the sweep builds the all-gene
+    lognorm layer: ``normalize_total(1e4)`` over all genes, then ``log1p``."""
+    import scanpy as sc
+    import scipy.sparse as sp
+
+    adata = ad.read_h5ad(st_path)
+    sc.pp.normalize_total(adata, target_sum=1e4)
+    sc.pp.log1p(adata)
+    return sp.csr_matrix(adata[:, genes].X, dtype=np.float32)
+
+
 def start_clustering_path(root: Path) -> Path | None:
     """The run root's start-clustering h5ad, or ``None`` if it has neither the
     current file nor the pre-rename ``leiden_overclustering.h5ad``."""

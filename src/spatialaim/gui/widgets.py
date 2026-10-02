@@ -382,7 +382,7 @@ const stateOf = (tr) => {
 }
 
 export default async function (component) {
-  const { parentElement, data, key } = component
+  const { parentElement, data, key, setTriggerValue } = component
 
   let gd = parentElement.querySelector(".spatialaim-gd")
   if (!gd) {
@@ -524,7 +524,14 @@ export default async function (component) {
   applySizes()
 
   // Refresh the live context read by the (once-attached) event handlers.
-  gd.__aimCtx = { toggle, isolate, applySizes, fig }
+  gd.__aimCtx = {
+    toggle,
+    isolate,
+    applySizes,
+    fig,
+    contextMenu: !!data.contextMenu,
+    openMenu: (s) => setTriggerValue("menu_state", s),
+  }
   if (!gd.__aimWired) {
     gd.__aimWired = true
 
@@ -542,9 +549,35 @@ export default async function (component) {
       return false
     })
 
+    // Right click on a state's point or legend entry opens that cell type's
+    // modal in Python (trigger "menu_state"); the browser's own context menu is
+    // suppressed only then. Plotly has no right-click event, so the point under
+    // the cursor is the last hovered one, and a legend entry is found from the
+    // event target (each legend item's datum carries its trace).
+    let hovered = null, lastMenu = 0
+    gd.on("plotly_hover", (ev) => {
+      const pt = ev.points && ev.points[0]
+      hovered = pt ? stateOf(pt.data) : null
+    })
+    gd.on("plotly_unhover", () => { hovered = null })
+    gd.addEventListener("contextmenu", (ev) => {
+      if (!gd.__aimCtx.contextMenu) return
+      const item = ev.target && ev.target.closest && ev.target.closest(".legend .traces")
+      const datum = item && item.__data__ && item.__data__[0]
+      const s = datum && datum.trace ? stateOf(datum.trace) : hovered
+      if (s === null || s === undefined) return
+      ev.preventDefault()
+      // Plotly can re-dispatch the event; open the modal once per click.
+      const now = Date.now()
+      if (now - lastMenu < 400) return
+      lastMenu = now
+      gd.__aimCtx.openMenu(s)
+    })
+
     // Points have no native double-click event, so time it ourselves.
     let timer = null, pending = null
     gd.on("plotly_click", (ev) => {
+      if (ev.event && ev.event.button === 2) return // right click: the modal
       const pt = ev.points && ev.points[0]
       if (!pt) return
       const s = stateOf(pt.data)
@@ -572,16 +605,30 @@ _HEADLINE_PLOT = st.components.v2.component(
 )
 
 
-def headline_plot(fig, key: str, *, off_color: str = "#dcdcdc") -> None:
+def headline_plot(
+    fig, key: str, *, off_color: str = "#dcdcdc", context_menu: bool = False
+) -> int | None:
     """Render ``fig`` (a Plotly figure) with client-side state toggle/isolate.
 
     ``off_color`` is the single light-gray colour used for every deactivated
-    state.
+    state. With ``context_menu`` a right click on a state's point or legend entry
+    reruns the script and returns that state (else ``None``) -- the caller opens
+    the cell-type modal for it.
     """
-    _HEADLINE_PLOT(
+    result = _HEADLINE_PLOT(
         key=key,
-        data={"figureJson": fig.to_json(), "offColor": off_color},
+        data={
+            "figureJson": fig.to_json(),
+            "offColor": off_color,
+            "contextMenu": context_menu,
+        },
+        on_menu_state_change=lambda: None,
     )
+    value = getattr(result, "menu_state", None)
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # --------------------------------------------------------------------------- #

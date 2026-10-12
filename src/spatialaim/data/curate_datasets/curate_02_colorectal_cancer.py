@@ -27,6 +27,8 @@ ST     the raw Vizgen release of the same sample the bundle was cropped from:
        the folder (or takes it from --vizgen-dir). Needed:
          HumanColonCancerPatient2_cell_by_gene.csv  (1.8 GB)
          cell_metadata.csv                          (114 MB)
+         cell_boundaries/                           (17.5 GB, 2382 hdf5 files;
+                                                     only the crop's FOVs are read)
 
 Why not the bundle's ST half: its cells, coordinates and gene order are exactly
 those of the Vizgen release, but CytoSPACE zeroed 1.69 M (cell, gene) entries
@@ -54,6 +56,13 @@ ST 02_colorectal-cancer.h5ad      (cells x 500)
   * var  index = the panel's column order without the 50 blanks, uppercased
            (identical to the bundle's gene order)
   * obsm["spatial"] = cell_metadata center_x/center_y, float32
+  * obs["segmentation_id"], uns["segmentation_pixel_size_um"] = 0.25 and the
+           mask ST/Segmentation/02_colorectal-cancer.tif: each cell's boundary
+           polygon (um) from cell_boundaries/feature_data_<fov>.hdf5, group
+           featuredata/<EntityID>, rasterised at 0.25 um per pixel. Vizgen
+           stores one polygon per z-plane (zIndex_0..6), but in this release
+           all seven are the same 2D outline (asserted); zIndex_0 is used. A
+           cell split into several polygons keeps its largest one.
 
 Two things in the sources are deliberately not carried over, matching
 01_Datasets_Used:
@@ -72,7 +81,7 @@ Usage
 The bundle is downloaded to a temporary folder below --out-dir and deleted again.
 Set SPATIALAIM_KEEP_DOWNLOADS=1 to keep (and on a re-run reuse) it in
 <out-dir>/_downloads/02_colorectal-cancer instead. The Vizgen folder is only
-read, never modified. Needs ~2 GB of free RAM.
+read, never modified. Needs ~3 GB of free RAM.
 """
 
 import logging
@@ -80,10 +89,11 @@ import zipfile
 from pathlib import Path
 
 import anndata as ad
+import h5py
 import numpy as np
 import pandas as pd
 
-from . import _common
+from . import _common, _segmentation
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +115,7 @@ VIZGEN_BUCKET = (
 VIZGEN_GS = f"gs://vz-ffpe-showcase/{PREFIX}"
 CELL_BY_GENE = f"{PREFIX}_cell_by_gene.csv"
 CELL_METADATA = "cell_metadata.csv"
+CELL_BOUNDARIES = "cell_boundaries"
 VIZGEN_BYTES = {CELL_BY_GENE: 1_810_825_493, CELL_METADATA: 114_163_220}
 VIZGEN_CELLS = 817_588
 N_BLANKS = 50
@@ -115,6 +126,7 @@ CROP_Y = (1500.0, 4500.0)
 CROP_CELLS = 69_276
 MIN_COUNTS = 5  # keep cells with more than this many gene counts
 N_GENES = 500
+MASK_PIXEL_UM = 0.25
 
 
 def _find(root: Path, filename: str) -> Path:
@@ -207,6 +219,8 @@ def _vizgen_problems(folder: Path) -> list[str]:
                 f"{name} has {path.stat().st_size} bytes, expected {size} "
                 "(download incomplete, or a different release)"
             )
+    if not (folder / CELL_BOUNDARIES).is_dir():
+        problems.append(f"{CELL_BOUNDARIES}/ not found in {folder}")
     return problems
 
 
@@ -227,8 +241,13 @@ def ask_vizgen_dir() -> Path:
     Or with the Google Cloud CLI, after `gcloud auth login`:
       gcloud storage cp {VIZGEN_GS}/{CELL_BY_GENE} {VIZGEN_GS}/{CELL_METADATA} <folder>
 
-    Not needed here: detected_transcripts.csv, images/, cell_boundaries/
-    (the segmentation; this script does not use it).
+    And the folder with the cell segmentation (2382 files, 17.5 GB; only the
+    files of the cropped FOVs are read, so a partial copy holding those works):
+      {CELL_BOUNDARIES}/
+    With the Google Cloud CLI:
+      gcloud storage cp -r {VIZGEN_GS}/{CELL_BOUNDARIES} <folder>
+
+    Not needed here: detected_transcripts.csv, images/.
 
  3. Paste the folder path below and press Enter (empty input aborts).
 ============================================================================""")
@@ -260,7 +279,62 @@ def _read_cell_by_gene(path: Path, keep: set[int]) -> pd.DataFrame:
     return frame
 
 
-def build_st(vizgen_dir: Path, out_path: Path) -> None:
+def _area(ring: np.ndarray) -> float:
+    x, y = ring[:, 0], ring[:, 1]
+    return 0.5 * abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+
+
+def _outlines(vizgen_dir: Path, meta: pd.DataFrame) -> list["list[np.ndarray] | None"]:
+    """Each cell's boundary polygon (um), in meta's row order."""
+    folder = vizgen_dir / CELL_BOUNDARIES
+    groups = meta.groupby("fov").groups
+    missing = [f for f in groups if not (folder / f"feature_data_{f}.hdf5").is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"{len(missing)} FOV file(s) of the crop are missing in {folder}, "
+            f"e.g. feature_data_{missing[0]}.hdf5"
+        )
+    row = {entity: i for i, entity in enumerate(meta.index)}
+    outlines: list["list[np.ndarray] | None"] = [None] * len(meta)
+    n_split = 0
+    for fov, entities in groups.items():
+        with h5py.File(folder / f"feature_data_{fov}.hdf5", "r") as handle:
+            features = handle["featuredata"]
+            for entity in entities:
+                if str(entity) not in features:
+                    continue
+                cell = features[str(entity)]
+                planes = [
+                    [
+                        np.asarray(part["coordinates"][0], dtype=np.float64)
+                        for part in cell[key].values()
+                    ]
+                    for key in sorted(k for k in cell if k.startswith("zIndex_"))
+                ]
+                for plane in planes[1:]:
+                    if len(plane) != len(planes[0]) or not all(
+                        a.shape == b.shape and np.array_equal(a, b)
+                        for a, b in zip(plane, planes[0])
+                    ):
+                        raise ValueError(
+                            f"cell {entity}: the z-planes hold different outlines - "
+                            "this release is not the 2D segmentation the script expects"
+                        )
+                parts = [ring for ring in planes[0] if len(ring) >= 3]
+                if not parts:
+                    continue
+                n_split += len(parts) > 1
+                outlines[row[entity]] = [max(parts, key=_area)]
+    logger.info(
+        "  outline %d of %d cells (%d split into several polygons: largest kept)",
+        sum(o is not None for o in outlines),
+        len(meta),
+        n_split,
+    )
+    return outlines
+
+
+def build_st(vizgen_dir: Path, st_dir: Path) -> None:
     logger.info("ST %s — Vizgen MERSCOPE %s, CytoSPACE crop", NAME, PREFIX)
     problems = _vizgen_problems(vizgen_dir)
     if problems:
@@ -303,7 +377,13 @@ def build_st(vizgen_dir: Path, out_path: Path) -> None:
         extent[:, 1].min(),
         extent[:, 1].max(),
     )
-    _common.write(adata, out_path)
+
+    mask, seg_id = _segmentation.rasterize(
+        _outlines(vizgen_dir, meta), MASK_PIXEL_UM, margin=5.0
+    )
+    _segmentation.write_mask(_segmentation.mask_path(st_dir, NAME), mask)
+    _segmentation.annotate(adata, seg_id, MASK_PIXEL_UM)
+    _common.write(adata, st_dir / f"{NAME}.h5ad")
 
 
 # --------------------------------------------------------------------------- #
@@ -314,8 +394,8 @@ def main() -> None:
         "--vizgen-dir",
         type=Path,
         default=None,
-        help=f"Folder with the downloaded {CELL_BY_GENE} and {CELL_METADATA} "
-        "(asked interactively if omitted)",
+        help=f"Folder with the downloaded {CELL_BY_GENE}, {CELL_METADATA} and "
+        f"{CELL_BOUNDARIES}/ (asked interactively if omitted)",
     )
     args = parser.parse_args()
     vizgen_dir = args.vizgen_dir or ask_vizgen_dir()
@@ -324,7 +404,7 @@ def main() -> None:
     with _common.staging(args.out_dir, NAME) as tmp_dir:
         bundle = fetch_bundle(tmp_dir)
         build_scrna(bundle, sc_dir / f"{NAME}.h5ad")
-    build_st(vizgen_dir, st_dir / f"{NAME}.h5ad")
+    build_st(vizgen_dir, st_dir)
 
     logger.info("%s done", NAME)
 

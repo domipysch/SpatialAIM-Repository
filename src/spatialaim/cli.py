@@ -205,8 +205,14 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     from spatialaim.data.validate import validate_pairs_csv, validate_single_pair
 
     if args.pairs_csv is not None:
-        if args.scdata is not None or args.stdata is not None:
-            _fail("--pairs_csv cannot be combined with --scdata/--stdata")
+        if (
+            args.scdata is not None
+            or args.stdata is not None
+            or args.segmentation is not None
+        ):
+            _fail(
+                "--pairs_csv cannot be combined with --scdata/--stdata/--segmentation"
+            )
         return validate_pairs_csv(args.pairs_csv, args.sc_dir, args.st_dir)
 
     if args.scdata is None or args.stdata is None:
@@ -216,7 +222,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         )
     if args.sc_dir is not None or args.st_dir is not None:
         _fail("--sc_dir/--st_dir only apply to --pairs_csv")
-    return validate_single_pair(args.scdata, args.stdata)
+    return validate_single_pair(args.scdata, args.stdata, args.segmentation)
 
 
 # ---------------------------------------------------------------------------
@@ -314,14 +320,21 @@ def _add_validate_parser(sub: "argparse._SubParsersAction") -> None:
         "validate",
         help="Validate a single sc/st pair or every pair of a pairs.csv.",
         description="Check the scRNA and ST h5ads against the SpatialAIM contract (raw "
-        "counts, unique uppercase gene names, ST obsm['spatial']) and the pair "
-        "against its shared-gene intersection. With --pairs_csv, an index.csv next "
-        "to the h5ads additionally cross-checks the recorded counts. Exits "
+        "counts, unique uppercase gene names, ST obsm['spatial'], the optional "
+        "cell segmentation mask) and the pair against its shared-gene intersection. "
+        "With --pairs_csv, an index.csv next to the h5ads additionally cross-checks "
+        "the recorded counts and names each ST slice's segmentation mask. Exits "
         "non-zero if any errors are found.",
     )
     # Single-pair mode
     p.add_argument("--scdata", type=Path, default=None, help="Single-pair: sc .h5ad")
     p.add_argument("--stdata", type=Path, default=None, help="Single-pair: ST .h5ad")
+    p.add_argument(
+        "--segmentation",
+        type=Path,
+        default=None,
+        help="Single-pair: optional cell segmentation mask of the ST slice (.tif, uint32)",
+    )
     # Batch mode
     p.add_argument(
         "--pairs_csv",

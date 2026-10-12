@@ -2,8 +2,9 @@
 
 Two entry points, one per CLI mode:
 
-* :func:`validate_single_pair` - one scRNA ``.h5ad`` x one ST ``.h5ad``, no index
-  CSVs involved (the count/annotation cross-checks are simply skipped).
+* :func:`validate_single_pair` - one scRNA ``.h5ad`` x one ST ``.h5ad`` (plus an
+  optional segmentation mask), no index CSVs involved (the count/annotation
+  cross-checks are simply skipped).
 * :func:`validate_pairs_csv` - every row of a ``pairs.csv``. Each referenced
   dataset is validated once; ``scRNA/index.csv`` and ``ST/index.csv`` are picked
   up next to the h5ad folders when they exist.
@@ -136,6 +137,7 @@ def check_pair(
     sc_path: Path,
     st_path: Path,
     on_subject: "Callable[[SubjectFindings], None] | None" = None,
+    segmentation_path: "Path | None" = None,
 ) -> PairFindings:
     """Run every check on one sc/st pair and return the findings; prints nothing.
 
@@ -143,6 +145,7 @@ def check_pair(
     GUI calls this so its sidebar check and the CLI apply the very same checks.
     ``on_subject`` is called as each subject finishes, so a caller can report the
     scRNA verdict while the (possibly large) ST file is still being read.
+    ``segmentation_path`` is the ST slice's optional cell segmentation mask.
     """
     sc_path, st_path = Path(sc_path), Path(st_path)
     subjects: list[SubjectFindings] = []
@@ -155,7 +158,9 @@ def check_pair(
 
     sc_errs, sc_warns, adata_sc = validate_sc(sc_path)
     _add(f"sc:{sc_path.stem}", f"sc {sc_path.stem}", sc_errs, sc_warns)
-    st_errs, st_warns, adata_st = validate_st(st_path)
+    st_errs, st_warns, adata_st = validate_st(
+        st_path, segmentation_path=segmentation_path
+    )
     _add(f"st:{st_path.stem}", f"st {st_path.stem}", st_errs, st_warns)
 
     if adata_sc is None or adata_st is None:
@@ -169,7 +174,9 @@ def check_pair(
     return PairFindings(subjects)
 
 
-def validate_single_pair(sc_path: Path, st_path: Path) -> int:
+def validate_single_pair(
+    sc_path: Path, st_path: Path, segmentation_path: "Path | None" = None
+) -> int:
     """Validate one sc/st pair given as two explicit ``.h5ad`` paths."""
     sc_path, st_path = Path(sc_path), Path(st_path)
 
@@ -179,6 +186,7 @@ def validate_single_pair(sc_path: Path, st_path: Path) -> int:
         sc_path,
         st_path,
         on_subject=lambda s: report.add(s.key, s.title, s.errors, s.warns),
+        segmentation_path=segmentation_path,
     )
     return report.finish()
 
@@ -197,7 +205,8 @@ def validate_pairs_csv(
 
     ``sc_dir`` / ``st_dir`` default to ``scRNA/`` and ``ST/`` next to the CSV.
     An ``index.csv`` in either folder enables the count / annotation
-    cross-checks; without it those checks are skipped (with a warning).
+    cross-checks; without it those checks are skipped (with a warning). The
+    ``Segmentation`` column of ``ST/index.csv`` names each slice's optional mask.
     """
     pairs_csv = Path(pairs_csv)
     if not pairs_csv.exists():

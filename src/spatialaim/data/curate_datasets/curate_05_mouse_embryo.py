@@ -1,13 +1,19 @@
 """
-Rebuild dataset 05_mouse-embryo (scRNA reference + its six ST slices) from source.
+Rebuild dataset 05_mouse-embryo (scRNA reference + its twelve ST slices) from source.
 
 Pairs covered (pairs.csv):
-    PairID  5   05_mouse-embryo  <->  05_1_mouse-embryo   (seqFISH, embryo1)
-    PairID  6   05_mouse-embryo  <->  05_2_mouse-embryo   (seqFISH, embryo2)
-    PairID  7   05_mouse-embryo  <->  05_3_mouse-embryo   (seqFISH, embryo3)
-    PairID  8   05_mouse-embryo  <->  05_4_mouse-embryo   (smFISH,  embryo1)
-    PairID  9   05_mouse-embryo  <->  05_5_mouse-embryo   (smFISH,  embryo2)
-    PairID 10   05_mouse-embryo  <->  05_6_mouse-embryo   (smFISH,  embryo3)
+    PairID  5   05_mouse-embryo  <->  05_1_1_mouse-embryo   (seqFISH, embryo1, z2)
+    PairID  6   05_mouse-embryo  <->  05_1_2_mouse-embryo   (seqFISH, embryo1, z5)
+    PairID  7   05_mouse-embryo  <->  05_2_1_mouse-embryo   (seqFISH, embryo2, z2)
+    PairID  8   05_mouse-embryo  <->  05_2_2_mouse-embryo   (seqFISH, embryo2, z5)
+    PairID  9   05_mouse-embryo  <->  05_3_1_mouse-embryo   (seqFISH, embryo3, z2)
+    PairID 10   05_mouse-embryo  <->  05_3_2_mouse-embryo   (seqFISH, embryo3, z5)
+    PairID 11   05_mouse-embryo  <->  05_4_1_mouse-embryo   (smFISH,  embryo1, z2)
+    PairID 12   05_mouse-embryo  <->  05_4_2_mouse-embryo   (smFISH,  embryo1, z5)
+    PairID 13   05_mouse-embryo  <->  05_5_1_mouse-embryo   (smFISH,  embryo2, z2)
+    PairID 14   05_mouse-embryo  <->  05_5_2_mouse-embryo   (smFISH,  embryo2, z5)
+    PairID 15   05_mouse-embryo  <->  05_6_1_mouse-embryo   (smFISH,  embryo3, z2)
+    PairID 16   05_mouse-embryo  <->  05_6_2_mouse-embryo   (smFISH,  embryo3, z5)
     (all ExperimentMatch: same_lab)
 
 Two Marioni-lab releases, used here in place of the STAMapper Google Drive copy:
@@ -37,7 +43,7 @@ have no effect on any analysis:
 
     scRNA obs["sizeFactor"]      <= 2.3e-16   (sizefactors.tab.gz is a text export)
     scRNA obs["doub.density"]    <= 1.0e-16   (meta.tab.gz is a text export)
-    ST    obsm["spatial"]        <= 5.4e-15   (coordinates in mm)
+    ST    obsm["spatial"]        <= 5.4e-15   (Lohoff's affine-scaled units)
 
 ------------------------------------------------------------------------------
 scRNA  05_mouse-embryo.h5ad   —  16861 x 19362, mouse gastrulation atlas, E8.5
@@ -70,7 +76,8 @@ Curation:
   * X     float64 raw counts (that dtype is what 01_Datasets_Used carries here)
 
 ------------------------------------------------------------------------------
-ST  05_1..3 (seqFISH, 351 genes) and 05_4..6 (smFISH, 36 genes)
+ST  05_1..3 (seqFISH, 351 genes) and 05_4..6 (smFISH, 36 genes), each split into
+    _1 (z-slice 2) and _2 (z-slice 5)
 ------------------------------------------------------------------------------
   metadata.Rds        cell metadata: coordinates, embryo, celltype_mapped_refined
   counts.Rds          seqFISH counts, dgCMatrix, 351 genes x 57536 cells
@@ -80,6 +87,12 @@ Curation (both panels):
   * cells = those whose ``celltype_mapped_refined`` is not "Low quality"
            (57536 -> 52568), split by embryo. The smFISH matrix covers slightly
            fewer cells, so those slices are the intersection.
+  * each embryo is further split by metadata ``z``: Lohoff et al. segmented
+           two optical sections per embryo, z2 and z5, ~12 um apart in depth.
+           Their cells are distinct but share one x/y frame, so in a common
+           slice they would lie on top of each other (~90 % of each cell's
+           area overlapped by a cell of the other layer). One slice per layer
+           keeps every slice a single tissue layer.
   * cell order differs between the two panels, and both orders are reproduced:
            the seqFISH slices keep metadata.Rds order, the smFISH slices are
            sorted by cell id.
@@ -87,7 +100,16 @@ Curation (both panels):
   * obs["nCount_RNA"], obs["nFeature_RNA"] = row sums and nonzero counts
   * obs["celltype"] = celltype_mapped_refined (23 types), obs["embryo"]
   * var   index = uppercased gene symbols, ``features`` = the originals
-  * obsm["spatial"] = x_global_affine, y_global_affine (mm, see fidelity note)
+  * obsm["spatial"] = x_global_affine, y_global_affine (Lohoff's affine-scaled
+           units, ~2147 original imaging pixels per unit; not mm)
+  * obs["segmentation_id"] and the mask ST/Segmentation/<slice>.tif: each cell's
+           outline from metadata.Rds (segmentation_vertices_x/y_global_affine,
+           same units as obsm["spatial"]), rasterised at MASK_STEP_PX original
+           imaging pixels per mask pixel. The pixels-per-unit factor is the
+           median of sqrt(Area / polygon area) over all cells (Area is Lohoff's
+           cell area in original pixels^2). Three kept cells have no vertices
+           and get segmentation_id 0. The physical pixel size is not published,
+           so uns["segmentation_pixel_size_um"] is not set.
 
 ------------------------------------------------------------------------------
 Usage
@@ -111,7 +133,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import coo_matrix, csr_matrix
 
-from . import _common
+from . import _common, _segmentation
 
 logger = logging.getLogger(__name__)
 
@@ -138,14 +160,24 @@ SMFISH_BYTES = 1_114_194
 
 SC_EXPECTED = (16861, 19362)
 ST_EXPECTED = {
-    "05_1_mouse-embryo": (17806, 351),
-    "05_2_mouse-embryo": (14185, 351),
-    "05_3_mouse-embryo": (20577, 351),
-    "05_4_mouse-embryo": (17758, 36),
-    "05_5_mouse-embryo": (14127, 36),
-    "05_6_mouse-embryo": (20544, 36),
+    "05_1_1_mouse-embryo": (10150, 351),
+    "05_1_2_mouse-embryo": (7656, 351),
+    "05_2_1_mouse-embryo": (7661, 351),
+    "05_2_2_mouse-embryo": (6524, 351),
+    "05_3_1_mouse-embryo": (11169, 351),
+    "05_3_2_mouse-embryo": (9408, 351),
+    "05_4_1_mouse-embryo": (10142, 36),
+    "05_4_2_mouse-embryo": (7616, 36),
+    "05_5_1_mouse-embryo": (7656, 36),
+    "05_5_2_mouse-embryo": (6471, 36),
+    "05_6_1_mouse-embryo": (11169, 36),
+    "05_6_2_mouse-embryo": (9375, 36),
 }
 EMBRYOS = ["embryo1", "embryo2", "embryo3"]
+Z_SLICES = [2, 5]  # the two segmented optical sections -> slice suffix _1, _2
+VERTICES_X = "segmentation_vertices_x_global_affine"
+VERTICES_Y = "segmentation_vertices_y_global_affine"
+MASK_STEP_PX = 2.0  # original imaging pixels per mask pixel
 LOW_QUALITY = "Low quality"
 MIN_CELLS = 3
 
@@ -408,6 +440,36 @@ def _slice(
     return adata
 
 
+def _outline(meta: pd.DataFrame, cell: str) -> "list[np.ndarray] | None":
+    x = np.asarray(meta.at[cell, VERTICES_X], dtype=np.float64)
+    y = np.asarray(meta.at[cell, VERTICES_Y], dtype=np.float64)
+    return [np.column_stack([x, y])] if len(x) >= 3 else None
+
+
+def _pixels_per_unit(meta: pd.DataFrame) -> float:
+    """Original imaging pixels per affine unit, from Area (px^2) vs polygon area."""
+    ratios = []
+    for cell, area in zip(meta.index, meta["Area"].to_numpy(dtype=np.float64)):
+        rings = _outline(meta, cell)
+        if rings is None:
+            continue
+        x, y = rings[0][:, 0], rings[0][:, 1]
+        poly = 0.5 * abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+        if poly > 0:
+            ratios.append(area / poly)
+    return float(np.sqrt(np.median(ratios)))
+
+
+def _segment(
+    adata: ad.AnnData, meta: pd.DataFrame, step: float, st_dir: Path, slice_name: str
+) -> None:
+    logger.info("  segmentation %s", slice_name)
+    outlines = [_outline(meta, cell) for cell in adata.obs_names]
+    mask, seg_id = _segmentation.rasterize(outlines, step, margin=20 * step)
+    _segmentation.write_mask(_segmentation.mask_path(st_dir, slice_name), mask)
+    _segmentation.annotate(adata, seg_id, None)
+
+
 def build_st(tmp_dir: Path, st_dir: Path) -> None:
     logger.info("ST %s — seqFISH and smFISH mouse embryos", NAME)
     meta_file = _common.download(
@@ -440,29 +502,46 @@ def build_st(tmp_dir: Path, st_dir: Path) -> None:
 
     good = meta["celltype_mapped_refined"].astype(str).to_numpy() != LOW_QUALITY
     embryo = meta["embryo"].astype(str).to_numpy()
+    z = meta["z"].astype(int).to_numpy()
     logger.info("  kept    %d cells (dropped %r)", int(good.sum()), LOW_QUALITY)
+    step = MASK_STEP_PX / _pixels_per_unit(meta)
+    logger.info(
+        "  mask    %.0f original px per mask px = %.3e units", MASK_STEP_PX, step
+    )
 
     # seqFISH slices: metadata order
     for number, name in enumerate(EMBRYOS, start=1):
-        mask = good & (embryo == name)
-        slice_name = f"05_{number}_{NAME.split('_', 1)[1]}"
-        adata = _slice(meta, meta.index.to_numpy()[mask], seqfish[mask], seqfish_genes)
-        _check_shape(adata, ST_EXPECTED[slice_name], slice_name)
-        _common.write(adata, st_dir / f"{slice_name}.h5ad")
+        for layer, z_slice in enumerate(Z_SLICES, start=1):
+            mask = good & (embryo == name) & (z == z_slice)
+            slice_name = f"05_{number}_{layer}_{NAME.split('_', 1)[1]}"
+            adata = _slice(
+                meta, meta.index.to_numpy()[mask], seqfish[mask], seqfish_genes
+            )
+            _check_shape(adata, ST_EXPECTED[slice_name], slice_name)
+            _segment(adata, meta, step, st_dir, slice_name)
+            _common.write(adata, st_dir / f"{slice_name}.h5ad")
 
     # smFISH slices: sorted by cell id, and only cells the smFISH panel covers
-    kept_ids = set(meta.index.to_numpy()[good])
+    z_of = dict(zip(meta.index.to_numpy()[good], z[good]))
     position = pd.Index(smfish_cells)
     for number, name in enumerate(EMBRYOS, start=4):
-        names = np.sort(
-            np.array(
-                [c for c in smfish_cells if c in kept_ids and c.startswith(f"{name}_")]
+        for layer, z_slice in enumerate(Z_SLICES, start=1):
+            names = np.sort(
+                np.array(
+                    [
+                        c
+                        for c in smfish_cells
+                        if c.startswith(f"{name}_") and z_of.get(c) == z_slice
+                    ]
+                )
             )
-        )
-        slice_name = f"05_{number}_{NAME.split('_', 1)[1]}"
-        adata = _slice(meta, names, smfish[position.get_indexer(names)], smfish_genes)
-        _check_shape(adata, ST_EXPECTED[slice_name], slice_name)
-        _common.write(adata, st_dir / f"{slice_name}.h5ad")
+            slice_name = f"05_{number}_{layer}_{NAME.split('_', 1)[1]}"
+            adata = _slice(
+                meta, names, smfish[position.get_indexer(names)], smfish_genes
+            )
+            _check_shape(adata, ST_EXPECTED[slice_name], slice_name)
+            _segment(adata, meta, step, st_dir, slice_name)
+            _common.write(adata, st_dir / f"{slice_name}.h5ad")
 
 
 # --------------------------------------------------------------------------- #

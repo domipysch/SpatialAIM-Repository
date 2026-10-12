@@ -5,6 +5,10 @@ They will download the datasets and convert the data into the required format.
 All but one work fully automatically: `curate_02_colorectal_cancer.py` takes its ST counts from the
 raw Vizgen release, which needs a Google sign-in; the script prints what to download and asks for
 the folder (or takes it from `--vizgen-dir`).
+Five of them also write the cell segmentation mask of their ST slices to `ST/Segmentation/<slice>.tif`
+and the matching `obs["segmentation_id"]` (02, 03, 04, 05, 09; shared code in `_segmentation.py`,
+rasterising needs `scikit-image` from the `data` extra). 01, 06, 07, 08 and 10 have no public
+segmentation. The `Segmentation` column of `ST/index.csv` is maintained by hand, like the counts.
 Only minor pre-processing (deleting near-empty columns etc.) has been applied.
 No normalization or log operations are applied to the data, as we are working on raw counts.
 

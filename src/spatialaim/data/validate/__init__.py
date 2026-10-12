@@ -2,6 +2,8 @@
 
 * :mod:`~spatialaim.data.validate.validate_sc` - one scRNA reference h5ad
 * :mod:`~spatialaim.data.validate.validate_st` - one ST slice h5ad
+* :mod:`~spatialaim.data.validate.validate_segmentation` - an ST slice's optional
+  cell segmentation mask
 * :mod:`~spatialaim.data.validate.validate_pair` - the scRNA x ST shared-gene pair
 * :mod:`~spatialaim.data.validate.runner` - the two CLI modes (single pair / pairs.csv)
 * :mod:`~spatialaim.data.validate.common` - checks shared by the validators
@@ -20,12 +22,14 @@ from .runner import (
     validate_single_pair,
 )
 from .validate_pair import validate_pair
+from .validate_segmentation import validate_segmentation
 from .validate_sc import validate_sc
 from .validate_st import validate_st
 
 __all__ = [
     "validate_sc",
     "validate_st",
+    "validate_segmentation",
     "validate_pair",
     "check_pair",
     "PairFindings",

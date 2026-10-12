@@ -4,6 +4,11 @@ Contract (see ``CLAUDE.md``): ``X`` raw counts, ``var_names`` unique and
 uppercase gene symbols, and ``obsm["spatial"]`` of shape ``(n_spots, 2)``.
 When an ``ST/index.csv`` row is supplied, its ``SpotCount`` / ``GeneCount``
 cells are cross-checked too.
+
+An optional cell segmentation mask is checked by
+:func:`~spatialaim.data.validate.validate_segmentation.validate_segmentation` -
+given explicitly, or by the index row's ``Segmentation`` column (a file name in
+``Segmentation/`` next to the h5ad; empty = no mask).
 """
 
 from __future__ import annotations
@@ -20,16 +25,23 @@ from .common import (
     check_index_counts,
     load_X,
 )
+from .validate_segmentation import validate_segmentation
 
-__all__ = ["validate_st"]
+__all__ = ["validate_st", "segmentation_path_of"]
+
+SEGMENTATION_DIR_NAME = "Segmentation"
 
 
 def validate_st(
     h5ad_path: Path,
     index_row: "pd.Series | None" = None,
     label: str = "st",
+    segmentation_path: "Path | None" = None,
 ) -> tuple[list[str], list[str], "ad.AnnData | None"]:
-    """Return ``(errors, warns, adata)``; ``adata`` is None if it could not be read."""
+    """Return ``(errors, warns, adata)``; ``adata`` is None if it could not be read.
+
+    ``segmentation_path`` defaults to the mask the index row names, if any.
+    """
     errors: list[str] = []
     warns: list[str] = []
 
@@ -61,7 +73,26 @@ def validate_st(
         )
     )
 
+    if segmentation_path is None:
+        segmentation_path = segmentation_path_of(h5ad_path, index_row)
+    if segmentation_path is not None:
+        errs, wrns = validate_segmentation(segmentation_path, adata, label)
+        errors.extend(errs)
+        warns.extend(wrns)
+
     return errors, warns, adata
+
+
+def segmentation_path_of(
+    h5ad_path: Path, index_row: "pd.Series | None"
+) -> "Path | None":
+    """The mask an ``ST/index.csv`` row names in its ``Segmentation`` column, or None."""
+    if index_row is None:
+        return None
+    name = str(index_row.get("Segmentation", "")).strip()
+    if not name:
+        return None
+    return Path(h5ad_path).parent / SEGMENTATION_DIR_NAME / name
 
 
 def _check_spatial(adata: "ad.AnnData", label: str) -> list[str]:

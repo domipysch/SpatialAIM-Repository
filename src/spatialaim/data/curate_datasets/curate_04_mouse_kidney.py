@@ -14,7 +14,8 @@ the STAMapper Google Drive copy.
 
 The kidney counterpart of curate_03_mouse_liver: same project, same 307-gene
 MERFISH panel, same Tabula Muris Senis reference. Five downloads (~1.1 GB); both
-sides then reproduce bit-exactly.
+sides then reproduce bit-exactly. Plus three files read
+out of the Vizgen run export zip for the segmentation mask (see ST below).
 
 ------------------------------------------------------------------------------
 scRNA  04_mouse-kidney.h5ad   —  2327 x 20138, Tabula Muris Senis droplet kidney
@@ -78,6 +79,16 @@ Curation:
            vs ELTD1/4631405K08RIK/DARC/SDPR/IGJ); 01_Datasets_Used has the older
            set, so the annotated file is the one to follow (same five as 03).
   * obsm["spatial"] = the raw file's ``obsm["spatial"]``, float64, verbatim
+  * obs["segmentation_id"], uns["segmentation_pixel_size_um"] = 0.25 and the
+           mask ST/Segmentation/<name>.tif: the cell outlines of the Vizgen run
+           export on figshare (https://figshare.com/articles/dataset/RawData/19310711,
+           MsKidney_CellBoundary_VZG116_111921.zip). Only cell_boundaries.geojson, cell_metadata.csv and
+           micron_to_mosaic_pixel_transform.csv are read out of the zip (HTTP
+           range requests), not the whole archive. Feature i of the geojson is
+           row i of cell_metadata.csv = our obs_name; the polygons are in mosaic
+           pixels (9.259 per um), like obsm["spatial"], and match obs
+           min/max_x/y exactly (asserted). Rasterised at 0.25 um per pixel,
+           holes cut out of their own cell.
 
 The annotated object's own X (log-normalised), embeddings and spatial (rescaled)
 are *not* used — only its labels and gene names.
@@ -102,7 +113,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 
-from . import _common
+from . import _common, _segmentation
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +135,9 @@ METADATA_MEMBER = "symphony/MACAkidney_10x_metadata.csv"
 RELABEL_COLUMN = "Cell ontology relabel"
 
 SC_EXPECTED = (2327, 20138)
+EXPORT_URL = f"{FIGSHARE}/37020589"  # MsKidney_CellBoundary_VZG116_111921.zip
+MASK_PIXEL_UM = 0.25
+
 ST_EXPECTED = (126547, 307)
 
 # The metadata columns carried over, in 01_Datasets_Used's order. The CSV's
@@ -253,7 +267,7 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # ST
 # --------------------------------------------------------------------------- #
-def build_st(tmp_dir: Path, out_path: Path) -> None:
+def build_st(tmp_dir: Path, st_dir: Path) -> None:
     logger.info("ST %s — MERFISH mouse kidney", NAME)
     raw_file = _common.download(
         ST_RAW_URL,
@@ -287,7 +301,16 @@ def build_st(tmp_dir: Path, out_path: Path) -> None:
     adata.obsm["spatial"] = np.asarray(raw.obsm["spatial"])
     _check_shape(adata, ST_EXPECTED, "ST")
     logger.info("  celltype: %d types", adata.obs["celltype"].cat.categories.size)
-    _common.write(adata, out_path)
+
+    outlines, px_per_um = _segmentation.vizgen_export_outlines(
+        EXPORT_URL, tmp_dir / "vizgen_export", adata.obs
+    )
+    mask, seg_id = _segmentation.rasterize(
+        outlines, MASK_PIXEL_UM * px_per_um, margin=50.0
+    )
+    _segmentation.write_mask(_segmentation.mask_path(st_dir, NAME), mask)
+    _segmentation.annotate(adata, seg_id, MASK_PIXEL_UM)
+    _common.write(adata, st_dir / f"{NAME}.h5ad")
 
 
 # --------------------------------------------------------------------------- #
@@ -298,7 +321,7 @@ def main() -> None:
 
     with _common.staging(args.out_dir, NAME) as tmp_dir:
         build_scrna(tmp_dir, sc_dir / f"{NAME}.h5ad")
-        build_st(tmp_dir, st_dir / f"{NAME}.h5ad")
+        build_st(tmp_dir, st_dir)
 
     logger.info("%s done", NAME)
 

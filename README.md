@@ -64,7 +64,8 @@ DATA/
 │   └── <scName>.h5ad
 ├── ST/
 │   ├── index.csv          # one row per ST dataset
-│   └── <stName>.h5ad
+│   ├── <stName>.h5ad
+│   └── Segmentation/      # optional cell segmentation masks (index.csv column `Segmentation`)
 └── pairs.csv              # links scRNA ↔ ST: PairID, scName, stName, …
 ```
 
@@ -101,7 +102,7 @@ Please install the corresponding conda environments on your computer.
 Check whether your data meets the main requirements.
 
 ```bash
-spatialaim validate --scdata path/to/sc.h5ad --stdata path/to/st.h5ad
+spatialaim validate --scdata path/to/sc.h5ad --stdata path/to/st.h5ad [--segmentation path/to/mask.tif]
 ```
 
 or for every pair of a `pairs.csv` laid out as in [Batch Processing](#batch-processing):
@@ -119,6 +120,10 @@ Validations per dataset:
   - raw count matrices (no NaN values, np negative values, integer-looking, not library-size normalized or log1p'd)
   - unique uppercase gene names
   - `obsm["spatial"]` of shape `(n_spots, 2)`.
+- Optional cell segmentation mask of an ST slice
+  - a 2D `.tif`/`.tiff` of dtype `uint32`: `0` = background, cells labelled `1..max` without gaps (labels without a cell in the h5ad are fine)
+  - the ST h5ad carries the integer `obs["segmentation_id"]` (each cell's mask label, `0` = no segmentation): non-negative, non-zero ids unique and present in the mask
+  - `uns["segmentation_pixel_size_um"]` (µm per pixel) is optional - a warning if missing
 - Per pair
   - the size of the shared-gene intersection
   - whether any ST spot is left all-zero by it.

@@ -16,9 +16,11 @@ dependencies:
   - pyyaml==6.0.3
   - anndata==0.12.7
   - scanpy==1.11.5          # Leiden over-clustering, UMAP, analysis.biology
+  - tifffile                # cell segmentation masks
   # --- data preparation only ---
   - matplotlib==3.9.2
   - rdata                   # read R .Rds sources (curate_datasets/curate_05_mouse_embryo)
+  - scikit-image            # rasterise segmentation outlines (curate_datasets/_segmentation)
   - pip:
     # --- core (pip-only) ---
     - igraph                # modularity (metrics.biology)

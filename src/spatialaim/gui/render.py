@@ -1216,10 +1216,10 @@ def _rank_markers(X, labels: np.ndarray, genes: list[str]) -> dict | None:
     vs. the rest) over the columns of ``X`` (lognorm, observations x ``genes``)
     — the scanpy clustering tutorial's recipe.
 
-    Returns ``{"genes", "states", "ranked", "score", "lfc", "padj", "mean",
+    Returns ``{"genes", "states", "ranked", "score", "padj", "mean",
     "frac"}`` or ``None`` when fewer than two testable labels (>= 2 observations
     each) exist. ``ranked`` maps each tested label to gene indices by decreasing
-    score; ``score``/``lfc``/``padj`` are (labels x genes), NaN for an untested
+    score; ``score``/``padj`` are (labels x genes), NaN for an untested
     label; ``mean`` (mean lognorm, zeros included) and ``frac`` (fraction > 0)
     feed the dotplot.
     """
@@ -1240,7 +1240,7 @@ def _rank_markers(X, labels: np.ndarray, genes: list[str]) -> dict | None:
     )
     adata.obs_names = [str(i) for i in range(adata.n_obs)]
     adata.var_names = genes
-    adata.uns["log1p"] = {"base": None}  # natural-log lognorm, for the fold changes
+    adata.uns["log1p"] = {"base": None}  # tells scanpy the data is natural-log lognorm
     sc.tl.rank_genes_groups(
         adata,
         groupby="state",
@@ -1252,7 +1252,7 @@ def _rank_markers(X, labels: np.ndarray, genes: list[str]) -> dict | None:
 
     gene_idx = {g: j for j, g in enumerate(genes)}
     shape = (len(states), len(genes))
-    score, lfc, padj = (np.full(shape, np.nan) for _ in range(3))
+    score, padj = (np.full(shape, np.nan) for _ in range(2))
     ranked: dict[int, list[int]] = {}
     for i, s in enumerate(states):
         if s not in tested:
@@ -1260,7 +1260,6 @@ def _rank_markers(X, labels: np.ndarray, genes: list[str]) -> dict | None:
         df = sc.get.rank_genes_groups_df(adata, group=str(s))
         cols = df["names"].map(gene_idx).to_numpy()
         score[i, cols] = df["scores"].to_numpy()
-        lfc[i, cols] = df["logfoldchanges"].to_numpy()
         padj[i, cols] = df["pvals_adj"].to_numpy()
         ranked[s] = cols.tolist()  # already sorted by decreasing score
 
@@ -1276,7 +1275,6 @@ def _rank_markers(X, labels: np.ndarray, genes: list[str]) -> dict | None:
         "states": states,
         "ranked": ranked,
         "score": score,
-        "lfc": lfc,
         "padj": padj,
         "mean": mean,
         "frac": frac,
@@ -1485,14 +1483,13 @@ def render_state_markers_figure(
     xs = np.tile(np.arange(n_cols), n_rows)
     ys = np.repeat(np.arange(n_rows), n_cols)
     # Per-dot hover fields; object dtype keeps the labels as strings.
-    custom = np.empty((n_rows * n_cols, 7), dtype=object)
+    custom = np.empty((n_rows * n_cols, 6), dtype=object)
     custom[:, 0] = np.repeat([_state_label(s, names) for s in states], n_cols)
     custom[:, 1] = np.tile([genes[j] for j in col_genes], n_rows)
     custom[:, 2] = frac.ravel()
     custom[:, 3] = mean.ravel()
     custom[:, 4] = mk["score"][:, gcols].ravel()
-    custom[:, 5] = mk["lfc"][:, gcols].ravel()
-    custom[:, 6] = mk["padj"][:, gcols].ravel()
+    custom[:, 5] = mk["padj"][:, gcols].ravel()
 
     fig = go.Figure()
     fig.add_trace(
@@ -1522,8 +1519,8 @@ def render_state_markers_figure(
                 "%{customdata[0]}<br><b>%{customdata[1]}</b>"
                 "<br>expressed in %{customdata[2]:.0%} of cells"
                 "<br>mean lognorm %{customdata[3]:.2f}"
-                "<br>score %{customdata[4]:.1f} · logFC %{customdata[5]:.2f}"
-                " · p_adj %{customdata[6]:.1e}<extra></extra>"
+                "<br>score %{customdata[4]:.1f} · p_adj %{customdata[5]:.1e}"
+                "<extra></extra>"
             ),
             showlegend=False,
         )
@@ -1608,7 +1605,7 @@ def state_marker_table(
 ) -> dict[str, list[dict]] | None:
     """The ``n`` most up- and downregulated marker genes of ``state``, with their
     Wilcoxon statistics: ``{"up": [...], "down": [...]}``, each row a dict of
-    ``gene``/``score``/``lfc``/``padj``/``frac`` (fraction of the state's cells
+    ``gene``/``score``/``padj``/``frac`` (fraction of the state's cells
     — or, with ``spatial``, its assigned spots — expressing the gene). From the
     reference ranking, or the spatial one when ``spatial`` is given. ``None``
     when the state was not ranked there.
@@ -1623,7 +1620,6 @@ def state_marker_table(
         return {
             "gene": mk["genes"][j],
             "score": float(mk["score"][i, j]),
-            "lfc": float(mk["lfc"][i, j]),
             "padj": float(mk["padj"][i, j]),
             "frac": float(mk["frac"][i, j]),
         }

@@ -448,8 +448,8 @@ def _cell_type_dialog_body(
                         width="stretch",
                         on_click=_select,
                         args=(r["gene"],),
-                        help=f"Wilcoxon score {r['score']:+.1f} · log fold change "
-                        f"{r['lfc']:+.2f} · adjusted p {r['padj']:.1e} · "
+                        help=f"Wilcoxon score {r['score']:+.1f} · adjusted p "
+                        f"{r['padj']:.1e} · "
                         f"expressed in {r['frac']:.0%} of this type's {where}",
                     )
                 st.caption(
@@ -1424,8 +1424,8 @@ def _reference_tab(
                 stem=f"reference_marker_genes_k{ctrl.k:03d}_n{int(n_genes)}",
                 caption="Dot size: fraction of the cell type's cells expressing "
                 "the gene. Colour: mean lognorm expression, scaled 0–1 per gene "
-                "across cell types. Hover for the Wilcoxon score, log fold "
-                "change and adjusted p-value.",
+                "across cell types. Hover for the Wilcoxon score and adjusted "
+                "p-value.",
             )
         if st.button(
             "Set cell type names",

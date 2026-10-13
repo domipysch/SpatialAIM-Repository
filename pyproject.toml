@@ -80,7 +80,6 @@ where = ["src"]
 # curate_06_mouse_retina reads an R .qs object, so it ships an R script and the
 # env spec for the small R environment that runs it.
 "spatialaim.data.curate_datasets" = ["*.yml", "*.R"]
-
 [tool.setuptools_scm]
 # Version is derived from git tags (e.g. v0.1.0). Falls back to 0.0.0.dev* in a
 # source tree without tags.

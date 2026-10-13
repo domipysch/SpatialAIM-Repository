@@ -1,5 +1,6 @@
 """Spatial-organisation metrics over spot state labels: a label-shuffling
-permutation test and local spatial purity."""
+permutation test, local spatial purity, and the per-node same-label neighbour
+count (used on the ST expression graph for transcriptional coherence)."""
 
 from __future__ import annotations
 
@@ -60,3 +61,25 @@ def local_spatial_purity(labels: np.ndarray, connectivities) -> float:
     if A.nnz == 0:
         return float("nan")
     return float((labels[A.row] == labels[A.col]).mean())
+
+
+def same_label_neighbours(
+    labels: np.ndarray, connectivities
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per node: how many of its graph neighbours share its label, and how many
+    neighbours it has.
+
+    A node's neighbours are the stored entries of its row in ``connectivities``
+    (any graph: the directed spatial KNN, the symmetric expression KNN), each
+    counted once whatever its weight, the node itself excluded. Returns
+    ``(same, degree)``, two int arrays of length n_nodes.
+    """
+    A = connectivities.tocoo()
+    off = A.row != A.col
+    row, col = A.row[off], A.col[off]
+    n = A.shape[0]
+    same = np.bincount(
+        row, weights=(labels[row] == labels[col]).astype(np.float64), minlength=n
+    )
+    degree = np.bincount(row, minlength=n)
+    return same.astype(np.int64), degree.astype(np.int64)

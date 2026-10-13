@@ -890,7 +890,7 @@ def render_compare_reconstruction_figure(cossims: dict[str, dict]) -> go.Figure 
     fig = make_subplots(
         rows=1,
         cols=2,
-        subplot_titles=["Gene-wise", "Spot-wise"],
+        subplot_titles=["Gene-wise", "Cell-wise"],
         horizontal_spacing=0.12,
     )
     for col, attr in ((1, "per_gene"), (2, "per_spot")):
@@ -987,7 +987,7 @@ def render_compare_fractions_figure(
         height=height,
         font=_CARD_FONT,
         barmode="group",
-        title=dict(text="Spot cell-type fractions", font=dict(size=13)),
+        title=dict(text="Spatial cell-type fractions", font=dict(size=13)),
         yaxis_title="fraction",
         margin=dict(l=10, r=10, t=40, b=40),
         legend=dict(orientation="h", yanchor="top", y=-0.2, x=0),
@@ -1310,11 +1310,15 @@ def _state_markers(_adata_sc, root_str: str, k: int):
 class SpatialContext(NamedTuple):
     """What the spatial side of the hover / cell-type modal needs: the ST file
     (for its expression), this mapper's per-spot hard assignment at this K, and
-    the spot coordinates (``None`` when the ST file has none)."""
+    the spot coordinates (``None`` when the ST file has none), plus the per-spot
+    confidence the modal's "General" view plots (``None`` = not shown) and its
+    axis title."""
 
     st_path: str
     hard: np.ndarray
     coords: np.ndarray | None
+    confidence: np.ndarray | None = None
+    confidence_title: str = "Confidence"
 
 
 @st.cache_resource(show_spinner="Loading spatial expression…")
@@ -1682,7 +1686,11 @@ def _modal_coords(
 
 
 def _map_row_figure(
-    panels: list[_MapPanel], *, color: str | None, dot_size: float
+    panels: list[_MapPanel],
+    *,
+    color: str | None,
+    dot_size: float,
+    height: int = 430,
 ) -> go.Figure:
     """One row of equal-aspect scatter panels. With ``color`` each panel's
     ``values`` is a mask drawn in that colour over every other point in grey;
@@ -1750,7 +1758,7 @@ def _map_row_figure(
             reversed_y=p.reversed_y,
             hide_ticks=True,
         )
-    return _base_layout(fig, height=430, margin=dict(l=10, r=10, t=40, b=10))
+    return _base_layout(fig, height=height, margin=dict(l=10, r=10, t=40, b=10))
 
 
 def render_cell_type_maps_figure(
@@ -1786,8 +1794,12 @@ def render_cell_type_maps_figure(
                 True,
             )
         )
+    # The modal's header row: kept low so the views below get the room.
     return _map_row_figure(
-        panels, color=_hex(state_palette(k).get(int(state))), dot_size=dot_size
+        panels,
+        color=_hex(state_palette(k).get(int(state))),
+        dot_size=dot_size,
+        height=300,
     )
 
 
@@ -1837,13 +1849,23 @@ _VIOLIN_MAX_CELLS = 20000
 
 
 def _add_violin(
-    fig: go.Figure, vals: np.ndarray, name: str, color: str, rng, *, col: int
+    fig: go.Figure,
+    vals: np.ndarray,
+    name: str,
+    color: str,
+    rng,
+    *,
+    col: int,
+    expressing: bool = True,
 ) -> None:
     """One violin (box + mean line) of ``vals`` in subplot column ``col``, with
-    the group's size and fraction of non-zero values under its label."""
+    the group's size and (``expressing``: for expression values) fraction of
+    non-zero values under its label."""
     if vals.size == 0:
         return
-    frac = float((vals > 0).mean())
+    sub = f"n = {vals.size:,}"
+    if expressing:
+        sub += f" · {float((vals > 0).mean()):.0%} expressing"
     shown = (
         rng.choice(vals, _VIOLIN_MAX_CELLS, replace=False)
         if vals.size > _VIOLIN_MAX_CELLS
@@ -1852,7 +1874,7 @@ def _add_violin(
     fig.add_trace(
         go.Violin(
             y=shown,
-            name=f"{name}<br>n = {vals.size:,} · {frac:.0%} expressing",
+            name=f"{name}<br>{sub}",
             line_color=color,
             fillcolor=color,
             opacity=0.75,
@@ -1914,9 +1936,101 @@ def render_gene_distribution_figure(
     if st_expr is not None:
         on = np.asarray(spatial.hard) == int(state)
         _add_violin(fig, st_expr[on], label, color, rng, col=2)
-        _add_violin(fig, st_expr[~on], "All other spots", "#9e9e9e", rng, col=2)
+        _add_violin(fig, st_expr[~on], "All other cells", "#9e9e9e", rng, col=2)
         fig.update_yaxes(title_text=f"{gene} (lognorm)", row=1, col=2)
     return _base_layout(fig, height=360, margin=dict(l=10, r=10, t=40, b=10))
+
+
+def render_state_confidence_figure(
+    root: Path, k: int, state: int, spatial: SpatialContext
+) -> go.Figure:
+    """Violins of the per-spot confidence (``spatial.confidence``) among the
+    spots assigned to ``state`` vs. among all spots."""
+    label = _state_label(state, _names_for(root, k))
+    color = _hex(state_palette(k).get(int(state)))
+    rng = np.random.default_rng(0)
+    conf = np.asarray(spatial.confidence, dtype=float)
+    on = np.asarray(spatial.hard) == int(state)
+    fig = make_subplots(
+        rows=1, cols=1, subplot_titles=[f"{spatial.confidence_title} per cell"]
+    )
+    _add_violin(fig, conf[on], label, color, rng, col=1, expressing=False)
+    _add_violin(fig, conf, "All cells", "#9e9e9e", rng, col=1, expressing=False)
+    fig.update_yaxes(title_text=spatial.confidence_title, range=[0.0, 1.0])
+    return _base_layout(fig, height=360, margin=dict(l=10, r=10, t=40, b=10))
+
+
+@st.cache_data(show_spinner=False)
+def _coherence_per_spot(root_str: str, k: int) -> np.ndarray:
+    """``data_access.load_coherence_per_spot``, cached per run root and K."""
+    return data_access.load_coherence_per_spot(Path(root_str), k)
+
+
+def render_state_coherence_figure(
+    root: Path, k: int, state: int, spatial: SpatialContext
+) -> go.Figure:
+    """Transcriptional coherence of ``state``: violins of each spot's share of
+    ST expression neighbours mapped to its own state, for the spots assigned to
+    ``state`` vs. all spots, with the state's chance level (its share of spots)
+    as a line."""
+    per_state = (data_access.load_data_json(root, k, "modularity_metrics.json") or {})[
+        "per_state"
+    ]
+    chance = per_state[str(int(state))]["chance"]
+    share = _coherence_per_spot(str(root), int(k))
+    label = _state_label(state, _names_for(root, k))
+    color = _hex(state_palette(k).get(int(state)))
+    rng = np.random.default_rng(0)
+    on = np.asarray(spatial.hard) == int(state)
+    fig = make_subplots(rows=1, cols=1)
+    for vals, name, c in ((share[on], label, color), (share, "All cells", "#9e9e9e")):
+        vals = vals[np.isfinite(vals)]
+        _add_violin(fig, vals, name, c, rng, col=1, expressing=False)
+    fig.add_hline(
+        y=chance,
+        line_dash="dash",
+        line_color="#555555",
+        annotation_text=f"chance {chance:.2f}",
+        annotation_position="top left",
+    )
+    fig.update_yaxes(
+        title_text="same-type share of expression neighbours", range=[0.0, 1.0]
+    )
+    return _base_layout(fig, height=360, margin=dict(l=10, r=10, t=20, b=10))
+
+
+def render_self_enrichment_figure(
+    root: Path, k: int, *, highlight: int | None = None
+) -> go.Figure:
+    """Self neighbourhood-enrichment z-score per computed state (how much more
+    often its spots border each other than under a label shuffle), as bars in
+    the per-state palette; with ``highlight`` every other state is grey. A state
+    without spots, or whose z-score is undefined, has no bar."""
+    topo = data_access.load_data_json(root, k, "topology_metrics.json") or {}
+    per_state = topo["per_state"]
+    palette = state_palette(k)
+    states = list(range(k))
+    z = [per_state.get(str(s), {}).get("self_zscore", float("nan")) for s in states]
+    fig = go.Figure(
+        go.Bar(
+            x=[_state_label(s, _names_for(root, k)) for s in states],
+            y=[v if np.isfinite(v) else None for v in z],
+            marker=dict(
+                color=[
+                    (
+                        _hex(palette.get(s))
+                        if highlight is None or s == int(highlight)
+                        else _BACKDROP_GREY
+                    )
+                    for s in states
+                ]
+            ),
+            hovertemplate="%{x}<br>z = %{y:.1f}<extra></extra>",
+        )
+    )
+    fig.add_hline(y=0.0, line_color="#555555", line_width=1)
+    _card_layout(fig, height=360, yaxis_title="self-enrichment z-score")
+    return fig
 
 
 # --------------------------------------------------------------------------- #
@@ -2261,46 +2375,59 @@ def render_ksweep_scatter_figure(
 
 
 def render_fractions_figure(
-    adata_sc: AnnData, root: Path, k: int, hard: np.ndarray
+    adata_sc: AnnData,
+    root: Path,
+    k: int,
+    hard: np.ndarray | None,
+    *,
+    highlight: int | None = None,
 ) -> go.Figure:
     """Cell fraction (reference states) and spot fraction (this mapper's
     assignment) per computed state, as one grouped-bar plot sharing a single
     y-axis. Both bars use the same per-state palette as the UMAP/spatial plots;
-    the spot bars are hatched to tell them apart."""
+    the spot bars are hatched to tell them apart. Without ``hard`` only the cell
+    bars; with ``highlight`` every other state is drawn in grey."""
     start_cluster_to_state = load_start_cluster_to_state(data_access.k_dir(root, k))
     infer_cell_to_state_cluster(adata_sc, start_cluster_to_state)
     cell_states = adata_sc.obs[OBS_COMPUTED_STATE].astype(int).to_numpy()
-    hard = np.asarray(hard).astype(int)
 
     palette = state_palette(k)
     states = list(range(k))
     x = [_state_label(s, _names_for(root, k)) for s in states]
-    colors = [_hex(palette.get(s)) for s in states]
+    colors = [
+        (
+            _hex(palette.get(s))
+            if highlight is None or s == int(highlight)
+            else _BACKDROP_GREY
+        )
+        for s in states
+    ]
     cell_frac = [float(np.mean(cell_states == s)) for s in states]
-    spot_frac = [float(np.mean(hard == s)) for s in states]
 
     fig = go.Figure()
     fig.add_trace(
         go.Bar(
-            name="Cell (solid)",
+            name="Reference (solid)",
             x=x,
             y=cell_frac,
             marker=dict(color=colors),
-            hovertemplate="Cell · %{x}<br>%{y:.1%}<extra></extra>",
+            hovertemplate="Reference · %{x}<br>%{y:.1%}<extra></extra>",
         )
     )
-    fig.add_trace(
-        go.Bar(
-            name="Spot (hatched)",
-            x=x,
-            y=spot_frac,
-            marker=dict(
-                color=colors,
-                pattern=dict(shape="/", size=6, solidity=0.55, fgcolor="white"),
-            ),
-            hovertemplate="Spot · %{x}<br>%{y:.1%}<extra></extra>",
+    if hard is not None:
+        hard = np.asarray(hard).astype(int)
+        fig.add_trace(
+            go.Bar(
+                name="Spatial (hatched)",
+                x=x,
+                y=[float(np.mean(hard == s)) for s in states],
+                marker=dict(
+                    color=colors,
+                    pattern=dict(shape="/", size=6, solidity=0.55, fgcolor="white"),
+                ),
+                hovertemplate="Spatial · %{x}<br>%{y:.1%}<extra></extra>",
+            )
         )
-    )
     _card_layout(
         fig,
         height=320,
@@ -2329,7 +2456,7 @@ def render_reconstruction_figure(cossim: dict[str, dict]) -> go.Figure | None:
     fig = make_subplots(
         rows=1,
         cols=2,
-        subplot_titles=["Gene-wise", "Spot-wise"],
+        subplot_titles=["Gene-wise", "Cell-wise"],
         horizontal_spacing=0.12,
     )
     for col, attr in ((1, "per_gene"), (2, "per_spot")):
@@ -2391,8 +2518,8 @@ def render_onehot_figure(max_prob: np.ndarray) -> go.Figure:
     _card_layout(
         fig,
         height=300,
-        xaxis_title="max probability per spot (1.0 = one-hot)",
-        yaxis_title="spots",
+        xaxis_title="max probability per cell (1.0 = one-hot)",
+        yaxis_title="cells",
         bargap=0.02,
     )
     if hi - lo < 1e-9:
@@ -2432,8 +2559,8 @@ def render_confidence_figure(confidence: np.ndarray) -> go.Figure:
     _card_layout(
         fig,
         height=300,
-        xaxis_title="assignment confidence per spot",
-        yaxis_title="spots",
+        xaxis_title="assignment confidence per cell",
+        yaxis_title="cells",
         bargap=0.02,
     )
     fig.update_xaxes(range=[0.0, 1.0])

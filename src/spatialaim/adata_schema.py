@@ -62,6 +62,9 @@ OBS_MAPPING_CONFIDENCE = "mapping_confidence"  # (n_spots,) float in [0,1] — p
 # obsm/obsp/uns — K-independent spatial/expression graphs, built once and reused across the K-sweep
 OBSP_SPATIAL_CONNECTIVITIES = "spatial_connectivities"  # (n_spots x n_spots) sparse — squidpy spatial KNN graph (local purity + neighbourhood enrichment)
 OBSP_ST_EXPR_CONNECTIVITIES = "expr_connectivities"  # (n_spots x n_spots) sparse — ST all-gene expression KNN graph for the mapping modularity
+OBS_SEGMENTATION_ID = "segmentation_id"  # (n_spots,) int — the cell's label in the optional segmentation mask, 0 = none (input, set at curation)
+OBSM_SHAPE_FEATURES = "shape_features"  # (n_spots x 3) — z-scored log(area), eccentricity, solidity from the segmentation mask; NaN rows = no segmentation; absent without a mask
+OBSP_SHAPE_CONNECTIVITIES = "shape_connectivities"  # (n_spots x n_spots) sparse — kNN graph in shape-feature space over the segmented cells (shape-consistency modularity)
 UNS_NHOOD_ENRICHMENT = f"{OBS_MAPPING_STATE_CAT}_nhood_enrichment"  # dict {zscore, count} — squidpy neighbourhood-enrichment result over the mapped states
 
 # ── shared across adata_sc and adata_st ─────────────────────────────────────

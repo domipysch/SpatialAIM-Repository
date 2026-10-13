@@ -79,8 +79,12 @@ def run_one_pair(
     st_path: Path,
     root_output_folder: Path,
     config: "SpatialAIMConfig",
+    segmentation_path: Path | None = None,
 ) -> "pd.DataFrame":
     """Write config.yaml + run the K-sweep for a single sc/st pair.
+
+    ``segmentation_path`` is the ST slice's optional cell segmentation mask, used
+    for the shape-consistency metric.
 
     The mapper-independent reference scaffold (start clusters + aggregates +
     UMAPs) is cached under ``root_output_folder`` and reused across mappers, so
@@ -111,6 +115,7 @@ def run_one_pair(
         k_max=config.k_max,
         k_step=config.k_step,
         start_from_annotation=config.start_from_annotation,
+        segmentation_path=segmentation_path,
     )
 
 

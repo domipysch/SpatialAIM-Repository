@@ -25,6 +25,7 @@ from spatialaim.adata_schema import (
 from spatialaim.config import LINKAGE_METHODS
 from spatialaim.analysis.analysis import run_analysis
 from spatialaim.analysis.ksweep import compare_k_runs
+from spatialaim.analysis.shape_consistency import prepare_shape_features
 from .aggregation import compute_start_cluster_aggregates
 from .clustering import (
     build_neighbor_graph_all_genes,
@@ -153,10 +154,15 @@ def run(
     k_max: int | None = None,
     k_step: int = 1,
     start_from_annotation: str | None = None,
+    segmentation_path: Path | None = None,
 ):
     """Run the full SpatialAIM sweep for one sc/ST pair, writing one folder per K under
     ``root_output_folder / mapper.name`` and running the post-mapping analysis on
     each.
+
+    ``segmentation_path`` is the ST slice's optional cell segmentation mask (2D
+    uint32 .tif, linked via ``obs["segmentation_id"]``); with it the analysis also
+    scores shape consistency, without it those scores are NaN.
 
     ``start_from_annotation`` is the ``obs`` column of a pre-existing cell-type
     annotation to use as the start clusters instead of a Leiden over-clustering; the
@@ -178,6 +184,9 @@ def run(
 
     adata_sc = anndata.read_h5ad(sc_path)
     adata_st = anndata.read_h5ad(st_path)
+    if segmentation_path is not None:
+        # K-independent: the cells' shapes are measured once per sweep.
+        prepare_shape_features(adata_st, segmentation_path)
 
     if start_from_annotation is not None:
         # Before preprocessing, so every later block covers the same cells.

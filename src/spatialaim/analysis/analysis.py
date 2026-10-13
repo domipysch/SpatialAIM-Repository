@@ -11,6 +11,7 @@ from .biology import (
 )
 from .confidence import analyse_spot_confidence
 from .reconstruction import analyse_reconstruction
+from .shape_consistency import analyse_shape_consistency
 from .topology import analyse_spatial_organization
 
 from .loading import (
@@ -28,8 +29,8 @@ def run_analysis(adata_sc: AnnData, adata_st: AnnData, run_dir: Path) -> None:
     metrics under ``run_dir/analysis/data/``.
 
     Loads this K's mapping and computes state stats, one-hotness, spatial
-    organisation, substate coherence, reconstruction cosine similarity and
-    modularity. No figures are rendered: the interactive GUI (``python -m gui``)
+    organisation, substate coherence, reconstruction cosine similarity,
+    modularity and shape consistency. No figures are rendered: the interactive GUI (``python -m gui``)
     builds every plot on demand from these outputs.
 
     Requires: adata_sc.obs[OBS_START_CLUSTER],
@@ -70,3 +71,6 @@ def run_analysis(adata_sc: AnnData, adata_st: AnnData, run_dir: Path) -> None:
 
     # logger.info("Computing modularity for computed assignment...")
     analyse_modularities(adata_sc, adata_st, data_dir)
+
+    # logger.info("Computing shape consistency (NaN without a segmentation mask)...")
+    analyse_shape_consistency(adata_st, data_dir)

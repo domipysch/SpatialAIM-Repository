@@ -19,7 +19,6 @@ from spatialaim.adata_schema import (
     UNS_START_CLUSTER_SIZES,
 )
 from spatialaim.metrics import (
-    CossimResult,
     assemble_state_centroids,
     compute_and_save_cossim,
     cossim_null_medians,
@@ -45,12 +44,13 @@ def analyse_reconstruction(
     """Cosine similarity of predicted (``mapping @ state_centroids``) vs. measured
     spot expression, per gene and per spot, for the four soft/hard x raw/norm combos.
 
-    Each *hard* combo also gets a label-shuffling null (``median_*_null``): the same
-    medians with the spot->state labels permuted, averaged over ``n_perm`` shuffles.
-    That is the chance level of the reconstruction — with only positive expression
-    profiles in play it is far above zero, so it is the reference the K-sweep view
-    compares against. The soft combos have no null (their assignment is a
-    distribution, not a label) and come through as NaN.
+    The per-gene / per-spot values of all four go to JSON (the GUI's
+    reconstruction card plots them); ``cossim_summary.csv`` holds the hard-raw
+    medians alone -- what the K selection scores -- next to their label-shuffling
+    null (``median_*_null``): the same medians with the spot->state labels
+    permuted, averaged over ``n_perm`` shuffles. That is the chance level of the
+    reconstruction — with only positive expression profiles in play it is far
+    above zero, so it is the reference the K-sweep view compares against.
 
     ``start_cluster_to_state`` is this K's start-cluster->state cut (L,).
     Requires: adata_st.obsm[OBSM_MAPPING_SOFT], adata_st.obs[OBS_MAPPING_HARD],
@@ -58,7 +58,7 @@ def analyse_reconstruction(
         adata_sc.uns[UNS_START_CLUSTER_SIZES],
         adata_sc.uns[UNS_START_CLUSTER_EXPR_SUMS_SHARED_GENES],
         adata_sc.uns[UNS_START_CLUSTER_EXPR_SUMS_SHARED_GENES_NORM].
-    Writes cossim_summary.csv and per-combo cossim JSONs under output_data_dir.
+    Writes cossim_summary.csv and the per-combo cossim JSONs under output_data_dir.
     """
 
     P = adata_st.obsm[OBSM_MAPPING_SOFT]
@@ -101,7 +101,6 @@ def analyse_reconstruction(
     }
     cossim_summary: dict[str, dict] = {}
     cossim_dir = output_data_dir / "cossim"
-    cossim_results: dict[str, CossimResult] = {}
     rng = np.random.default_rng(seed)
     for label, (m, centroids, st_ref, is_hard) in combos.items():
         pred = centroids[m] if is_hard else predict_expression(m, centroids)
@@ -113,13 +112,12 @@ def analyse_reconstruction(
         result = compute_and_save_cossim(
             st_ref, pred_adata, cossim_dir, suffix=f"-{label}"
         )
-        cossim_results[label] = result
+        if label != "hard-raw":
+            continue  # the K selection scores the hard-raw medians alone
         # ``st_ref`` is already restricted to the shared genes in centroid column
         # order, so the null reduces the very same matrices as the observed value.
-        null = (
-            cossim_null_medians(to_dense(st_ref), centroids, m, n_perm=n_perm, rng=rng)
-            if label == "hard-raw"
-            else {"median_spot": float("nan"), "median_gene": float("nan")}
+        null = cossim_null_medians(
+            to_dense(st_ref), centroids, m, n_perm=n_perm, rng=rng
         )
         cossim_summary[label] = {
             "median_gene": result.median_gene,

@@ -48,8 +48,9 @@ def analyse_spatial_organization(
 
     Local spatial purity comes with a permutation-null z-score; the self
     neighbourhood-enrichment z-score summarises how much each state preferentially
-    borders itself (see ``_nhood_enrichment``). Individually undefined metrics come
-    back as NaN/None; asserts len(coords) == len(spot_states) and
+    borders itself (see ``_nhood_enrichment``); the per-state z-scores are kept
+    too (``per_state``), for the GUI's cell-type modal. Individually undefined
+    metrics come back as NaN/None; asserts len(coords) == len(spot_states) and
     len(spot_states) > k.
 
     Requires: adata_st.obs[OBS_MAPPING_HARD], adata_st.obsm[OBSM_SPATIAL].
@@ -58,14 +59,6 @@ def analyse_spatial_organization(
     spot_states = adata_st.obs[OBS_MAPPING_HARD].to_numpy()
     coords = np.asarray(adata_st.obsm[OBSM_SPATIAL])
 
-    result: dict = {
-        "n_spots": int(len(spot_states)),
-        "n_mapped_states": int(len(np.unique(spot_states))),
-        "k": int(k),
-        "n_perm": int(n_perm),
-        "local_purity": None,
-        "nhood_enrichment": None,
-    }
     assert len(coords) == len(
         spot_states
     ), "Spatial organisation skipped: coordinates length mismatch "
@@ -75,13 +68,24 @@ def analyse_spatial_organization(
 
     conn = spatial_connectivities(adata_st, k)
     obs_lsp = local_spatial_purity(spot_states, conn)
-    result["local_purity"] = permutation_test(
+    local_purity = permutation_test(
         obs_lsp, spot_states, lambda l: local_spatial_purity(l, conn), n_perm, rng
     )
 
-    result["nhood_enrichment"] = _nhood_enrichment(
-        adata_st, spot_states, k, n_perm, seed
-    )
+    nhood, self_z = _nhood_enrichment(adata_st, spot_states, k, n_perm, seed)
+    result = {
+        "local_purity": local_purity,
+        "nhood_enrichment": nhood,
+        # Per mapped state, its self z-score, for the GUI's cell-type modal.
+        "per_state": {
+            str(int(s)): {
+                "self_zscore": (
+                    float(self_z[s]) if self_z is not None else float("nan")
+                )
+            }
+            for s in np.unique(spot_states)
+        },
+    }
 
     with open(output_data_dir / "topology_metrics.json", "w") as f:
         json.dump(result, f, indent=4)
@@ -93,9 +97,10 @@ def _nhood_enrichment(
     k: int,
     n_perm: int,
     seed: int,
-) -> dict | None:
+) -> tuple[dict | None, np.ndarray | None]:
     """Self neighbourhood-enrichment z-score of the mapped states, averaged over
-    states. Needs >= 2 mapped states (returns None otherwise).
+    states, plus the per-state z-scores (indexed by state; NaN for a state with
+    no spots). Needs >= 2 mapped states (returns ``(None, None)`` otherwise).
 
     Only the *self* term is computed -- the diagonal of squidpy's neighbourhood
     enrichment -- since ``mean_self_zscore`` is the sole value consumed downstream.
@@ -110,7 +115,7 @@ def _nhood_enrichment(
     graph and null, different permutation RNG.
     """
     if len(np.unique(spot_states)) < 2:
-        return None
+        return None, None
 
     A = spatial_connectivities(adata_st, k).tocoo()
     row, col = A.row, A.col
@@ -134,9 +139,9 @@ def _nhood_enrichment(
     ok = std > 0
     z[ok] = (observed[ok] - mean[ok]) / std[ok]
     self_z = z[present]
-    return {
-        "n_states": int(len(present)),
+    summary = {
         "mean_self_zscore": (
             float(np.nanmean(self_z)) if np.isfinite(self_z).any() else float("nan")
         ),
     }
+    return summary, z

@@ -349,6 +349,12 @@ _MARKER_LISTS = {
     "down": ("↓ Downregulated", False, "down"),
     "down_st": ("↓ Downregulated · ST", True, "down"),
 }
+# The modal's views, picked in its left bar: key -> (label, icon). "genes" lists
+# the marker genes beneath it.
+_CTDLG_VIEWS = {
+    "general": ("General", ":material/insights:"),
+    "genes": ("Gene expression", ":material/genetics:"),
+}
 
 
 def _cell_type_dialog_body(
@@ -361,104 +367,60 @@ def _cell_type_dialog_body(
     origin: str,
 ) -> None:
     """The cell-type modal (right click on a cell type in a headline / reference
-    plot): a name field for the type (the same names the "Set cell type names"
-    dialog edits), a dropdown choosing one of the type's marker-gene lists (10 most up-
-    or downregulated in the reference and, in a mapper tab, among the spots
-    assigned to it), listed beneath it (click one to select it); for the
-    selected gene two all-gene reference UMAPs (the type highlighted; the gene's
-    expression), in a mapper tab the same two as spatial maps, and the gene's
-    distribution in the type vs. all other cells (and spots)."""
+    plot). A header row: a name field for the type (the same names the "Set cell
+    type names" dialog edits) beside the type highlighted on the all-gene
+    reference UMAP (and, in a mapper tab, the spatial map). Below, a bar of
+    views -- "General" (selected on opening, ``_cell_type_general_view``) and
+    "Gene expression", which lists the type's marker genes beneath it
+    (``_cell_type_gene_list``) -- beside the selected view."""
     # "large" is too narrow for two UMAPs beside the gene list; widen only this
     # dialog (matched through the keyed container inside it).
     st.html(
         "<style>div[role='dialog']:has(.st-key-ctdlg_root)"
-        "{width:min(1400px,95vw);max-width:95vw}</style>"
+        "{width:min(1400px,95vw);max-width:95vw}"
+        # A tight gene list, with horizontal room around each GeneCards link.
+        ".st-key-ctdlg_genes{gap:0.1rem}"
+        ".st-key-ctdlg_genes button,.st-key-ctdlg_genes a"
+        "{min-height:1.9rem;padding-top:0.1rem;padding-bottom:0.1rem}"
+        "div[class*='st-key-ctdlg_gc_']{padding:0 0.4rem}"
+        # A slim divider between the header row and the views.
+        ".st-key-ctdlg_root hr{margin:0.25rem 0 0.75rem}</style>"
     )
-    tables = {False: render.state_marker_table(adata_sc, root, k, state)}
-    if spatial is not None:
-        tables[True] = render.state_marker_table(
-            adata_sc, root, k, state, spatial=spatial
-        )
-    # The selection is per mapper too: the spatial lists depend on the mapping.
-    sel_key = f"ctdlg_sel_{root.name}_{k}_{state}"
-    if sel_key not in st.session_state:
-        first = next(
-            (r["gene"] for t in tables.values() if t for r in t["up"] + t["down"]),
-            None,
-        )
-        st.session_state[sel_key] = first
-    gene = st.session_state.get(sel_key)
+    # View and gene are per mapper too: the spatial lists depend on the mapping.
+    view_key = f"ctdlg_view_{root.name}_{k}_{state}"
+    gene_key = f"ctdlg_gene_{root.name}_{k}_{state}"
+    if st.session_state.get(view_key) not in _CTDLG_VIEWS:
+        st.session_state[view_key] = "general"
+    view = st.session_state[view_key]
 
-    def _select(g: str) -> None:
-        st.session_state[sel_key] = g
+    def _show(v: str, g: str | None = None) -> None:
+        st.session_state[view_key] = v
+        if g is not None:
+            st.session_state[gene_key] = g
 
     with st.container(key="ctdlg_root"):
-        left, right = st.columns([1, 4], gap="medium")
-        with left:
-            # The name sits above the gene list, in the same narrow column.
+        head_left, head_right = st.columns([1, 4], gap="medium")
+        with head_left:
+            # A form, so Enter and the button both save in one step (a plain
+            # input only commits its value on Enter, before any save).
             current = state_names.load(output_dir, k).get(int(state), "")
-            new_name = st.text_input(
-                "Cell type name",
-                value=current,
-                placeholder=f"Cell type {state}",
-                key=f"ctdlg_name_{k}_{state}",
-                help="Shared by every method at this K; leave empty for the "
-                "default label.",
-            )
-            if st.button(
-                "Save name",
-                icon=":material/edit:",
-                key=f"ctdlg_name_save_{k}_{state}",
-                disabled=new_name.strip() == current,
-                width="stretch",
-            ):
+            with st.form(f"ctdlg_name_form_{k}_{state}", border=False):
+                new_name = st.text_input(
+                    "Set cell type name",
+                    value=current,
+                    placeholder=f"Cell type {state}",
+                    key=f"ctdlg_name_{k}_{state}",
+                )
+                saved = st.form_submit_button(
+                    "Save name",
+                    icon=":material/edit:",
+                    width="stretch",
+                )
+            if saved and new_name.strip() != current:
                 state_names.set_name(output_dir, k, state, new_name)
                 st.session_state[_CTDLG_REOPEN] = (origin, k, int(state))
                 st.rerun()
-            st.divider()
-            options = ["up", "up_st", "down", "down_st"] if spatial else ["up", "down"]
-            # Name the source on every entry once there are two of them.
-            labels = {
-                key: (lab if spatial is None or from_st else lab + " · scRNA")
-                for key, (lab, from_st, _d) in _MARKER_LISTS.items()
-            }
-            choice = st.selectbox(
-                "Marker genes",
-                options,
-                format_func=labels.get,
-                key=f"ctdlg_dir_{k}_{state}_{bool(spatial)}",
-                label_visibility="collapsed",
-            )
-            _lab, from_st, direction = _MARKER_LISTS[choice]
-            table = tables.get(from_st)
-            if table is None:
-                st.info(
-                    "No marker ranking for this cell type here (too few "
-                    + ("assigned spots)." if from_st else "cells).")
-                )
-            else:
-                if not table[direction]:
-                    st.caption("none")
-                for r in table[direction]:
-                    where = "assigned spots" if from_st else "cells"
-                    st.button(
-                        f"{r['gene']}  ({r['score']:+.1f})",
-                        key=f"ctdlg_{k}_{state}_{choice}_{r['gene']}",
-                        type="primary" if r["gene"] == gene else "tertiary",
-                        width="stretch",
-                        on_click=_select,
-                        args=(r["gene"],),
-                        help=f"Wilcoxon score {r['score']:+.1f} · adjusted p "
-                        f"{r['padj']:.1e} · "
-                        f"expressed in {r['frac']:.0%} of this type's {where}",
-                    )
-                st.caption(
-                    f"Shared genes, Wilcoxon vs. all other {where}; score in "
-                    "brackets."
-                )
-        with right:
-            # Row 1: the cell type (reference | spatial); row 2: the selected
-            # gene's expression on the same two maps; then its distributions.
+        with head_right:
             st.plotly_chart(
                 render.render_cell_type_maps_figure(
                     adata_sc, root, k, state, spatial=spatial
@@ -466,7 +428,29 @@ def _cell_type_dialog_body(
                 width="stretch",
                 key="ctdlg_types",
             )
-            if gene:
+
+        st.divider()
+        nav, body = st.columns([1, 4], gap="medium")
+        with nav:
+            for v, (lab, icon) in _CTDLG_VIEWS.items():
+                st.button(
+                    lab,
+                    icon=icon,
+                    key=f"ctdlg_nav_{v}_{k}_{state}",
+                    type="primary" if v == view else "tertiary",
+                    width="stretch",
+                    on_click=_show,
+                    args=(v,),
+                )
+            gene = (
+                _cell_type_gene_list(adata_sc, root, k, state, spatial, gene_key, _show)
+                if view == "genes"
+                else None
+            )
+        with body:
+            if view == "general":
+                _cell_type_general_view(adata_sc, root, k, state, spatial)
+            elif gene:
                 st.plotly_chart(
                     render.render_gene_maps_figure(
                         adata_sc, root, k, gene, spatial=spatial
@@ -481,6 +465,142 @@ def _cell_type_dialog_body(
                     width="stretch",
                     key="ctdlg_violin",
                 )
+
+
+def _cell_type_gene_list(
+    adata_sc: "AnnData",
+    root: Path,
+    k: int,
+    state: int,
+    spatial: "render.SpatialContext | None",
+    gene_key: str,
+    show: Callable[..., None],
+) -> str | None:
+    """The modal's marker-gene list (under "Gene expression"): a dropdown of the
+    type's lists (10 most up- or downregulated in the reference and, in a mapper
+    tab, among the spots assigned to it), each gene a button selecting it plus a
+    GeneCards link. Returns the selected gene -- the first listed one until a
+    gene is clicked -- or ``None`` when there is none."""
+    tables = {False: render.state_marker_table(adata_sc, root, k, state)}
+    if spatial is not None:
+        tables[True] = render.state_marker_table(
+            adata_sc, root, k, state, spatial=spatial
+        )
+    options = ["up", "up_st", "down", "down_st"] if spatial else ["up", "down"]
+    # Name the source on every entry once there are two of them.
+    labels = {
+        key: (lab if spatial is None or from_st else lab + " · scRNA")
+        for key, (lab, from_st, _d) in _MARKER_LISTS.items()
+    }
+    choice = st.selectbox(
+        "Marker genes",
+        options,
+        format_func=labels.get,
+        key=f"ctdlg_dir_{k}_{state}_{bool(spatial)}",
+        label_visibility="collapsed",
+    )
+    _lab, from_st, direction = _MARKER_LISTS[choice]
+    table = tables.get(from_st)
+    if table is None:
+        st.info(
+            "No marker ranking for this cell type here (too few "
+            + ("assigned cells)." if from_st else "cells).")
+        )
+        return st.session_state.get(gene_key)
+    rows = table[direction]
+    if not rows:
+        st.caption("none")
+    gene = st.session_state.get(gene_key) or (rows[0]["gene"] if rows else None)
+    where = "assigned cells" if from_st else "cells"
+    genes_box = st.container(key="ctdlg_genes")
+    for r in rows:
+        link_col, gene_col = genes_box.columns(
+            [1, 6], gap="small", vertical_alignment="center"
+        )
+        gene_col.button(
+            f"{r['gene']}  ({r['score']:+.1f})",
+            key=f"ctdlg_{k}_{state}_{choice}_{r['gene']}",
+            type="primary" if r["gene"] == gene else "tertiary",
+            width="stretch",
+            on_click=show,
+            args=("genes", r["gene"]),
+            help=f"Wilcoxon score {r['score']:+.1f} · adjusted p "
+            f"{r['padj']:.1e} · "
+            f"expressed in {r['frac']:.0%} of this type's {where}",
+        )
+        link_col.link_button(
+            "",
+            f"https://www.genecards.org/card/{r['gene']}",
+            key=f"ctdlg_gc_{k}_{state}_{choice}_{r['gene']}",
+            icon=":material/open_in_new:",
+            type="tertiary",
+            help=f"Open {r['gene']} on GeneCards",
+        )
+    st.caption(f"Shared genes, Wilcoxon vs. all other {where}; score in brackets.")
+    return gene
+
+
+def _cell_type_general_view(
+    adata_sc: "AnnData",
+    root: Path,
+    k: int,
+    state: int,
+    spatial: "render.SpatialContext | None",
+) -> None:
+    """The cell-type modal's "General" view. A per-type bar plot beside a
+    this-type-vs-all-spots violin in each row, every other type greyed out in the
+    bars: the cell-type fractions beside the mapping confidence, and the self
+    neighbourhood-enrichment z-score (spatial organisation) beside the
+    transcriptional coherence. The reference tab has no mapping, so it shows the
+    fractions alone."""
+    fractions = render.render_fractions_figure(
+        adata_sc,
+        root,
+        k,
+        spatial.hard if spatial is not None else None,
+        highlight=state,
+    )
+    if spatial is None:
+        st.markdown("**Cell type fractions**")
+        st.plotly_chart(fractions, width="stretch", key="ctdlg_frac")
+        return
+
+    frac_col, conf_col = st.columns([3, 2])
+    with frac_col:
+        st.markdown("**Cell type fractions**")
+        st.plotly_chart(fractions, width="stretch", key="ctdlg_frac")
+    with conf_col:
+        st.markdown(f"**Mapping {spatial.confidence_title.lower()}**")
+        st.plotly_chart(
+            render.render_state_confidence_figure(root, k, state, spatial),
+            width="stretch",
+            key="ctdlg_conf",
+        )
+    z_col, coh_col = st.columns([3, 2])
+    with z_col:
+        st.markdown(
+            "**Spatial organization**",
+            help="Self neighbourhood enrichment per cell type: how much more "
+            "often its cells border each other (6 nearest cells) than under a "
+            "label shuffle, as a z-score.",
+        )
+        st.plotly_chart(
+            render.render_self_enrichment_figure(root, k, highlight=state),
+            width="stretch",
+            key="ctdlg_selfz",
+        )
+    with coh_col:
+        st.markdown(
+            "**Transcriptional coherence**",
+            help="Per spatial cell: the share of its 15 most similar cells by ST "
+            "expression that were mapped to its own cell type. Chance: the "
+            "type's share of spatial cells.",
+        )
+        st.plotly_chart(
+            render.render_state_coherence_figure(root, k, state, spatial),
+            width="stretch",
+            key="ctdlg_coherence",
+        )
 
 
 @st.dialog("About this card", width="large")
@@ -612,7 +732,7 @@ def _headline(
                 "Plot confidence",
                 value=False,
                 key=f"{key_prefix}_pconf",
-                help="Colour spots by confidence intensity instead of assigned "
+                help="Colour cells by confidence intensity instead of assigned "
                 "cell type.",
             )
 
@@ -659,8 +779,16 @@ def _headline(
         if menu_state is None:
             menu_state = _reopened_state(origin, k)
         if menu_state is not None and adata_sc is not None:
+            # The reference aligners write no confidence; as in the report's
+            # confidence card, their soft mapping's max per spot stands in.
             spatial = (
-                render.SpatialContext(str(args.stdata), hard, coords)
+                render.SpatialContext(
+                    str(args.stdata),
+                    hard,
+                    coords,
+                    confidence if have_conf else _P.max(axis=1),
+                    "Confidence" if have_conf else "Max probability",
+                )
                 if have_spatial and len(hard) == len(coords)
                 else None
             )
@@ -1020,15 +1148,16 @@ _TOPOLOGY_FIELDS: dict[str, tuple[str, ...]] = {
 def _topology_groups(metrics: dict) -> dict[str, dict]:
     """The nested metric groups of ``topology_metrics.json``, shaped for display.
 
-    Drops the top-level scalars (n_spots, k, n_perm, ...) and, for a known group,
+    Drops any top-level scalar and, for a known group,
     keeps only the fields in ``_TOPOLOGY_FIELDS`` in that order. Fields absent
     from the JSON are skipped, so a run written before a field existed still
     renders. ``nhood_enrichment`` is null when there are too few mapped states;
-    that is not a dict, so it drops out here as it always did.
+    that is not a dict, so it drops out here as it always did. ``per_state``
+    feeds the cell-type modal, not this card.
     """
     out: dict[str, dict] = {}
     for group, vals in metrics.items():
-        if not isinstance(vals, dict):
+        if not isinstance(vals, dict) or group == "per_state":
             continue
         order = _TOPOLOGY_FIELDS.get(group)
         out[group] = vals if order is None else {f: vals[f] for f in order if f in vals}
@@ -1040,10 +1169,10 @@ def _topology_groups(metrics: dict) -> dict[str, dict]:
 _HELP_FRACTIONS = """
 For each computed cell type you see two bars:
 
-- **Cell (solid)**: the fraction of reference cells belonging to that cell type.
+- **Reference (solid)**: the fraction of reference cells belonging to that cell type.
   (It follows from the tree cut alone, so it is the same for every mapping
   method.)
-- **Spot (hatched)**: the fraction of spatial cells this method assigned to that
+- **Spatial (hatched)**: the fraction of spatial cells this method assigned to that
   cell type.
 
 The two need not match: the reference and the tissue section need not contain the
@@ -1055,7 +1184,7 @@ Each spatial cell's gene expression is predicted from the cell type profiles it
 was mapped onto, and compared against the measured ST expression of that same
 spatial cell over the shared genes, by cosine similarity (0–1, higher is better).
 
-There are two panels: gene-wise and spot-wise cosine similarity. In each panel
+There are two panels: gene-wise and cell-wise cosine similarity. In each panel
 there are four boxes:
 
 - **soft** predicts gene expression from the original spatial cell × cell-types
@@ -1093,7 +1222,7 @@ def _confidence_caption(mapper: str) -> str:
     if mapper == "nearest_centroid":
         dn = f"d{str(N_TOP_STATES).translate(_SUBSCRIPT)}"  # e.g. "d₄"
         return (
-            "Each spot is assigned to its most cosine-similar cell-type centroid; "
+            "Each spatial cell is assigned to its most cosine-similar cell-type centroid; "
             "its "
             f"confidence is the winner's *relative margin* over the top-"
             f"{N_TOP_STATES} rivals in cosine-distance space — for the "
@@ -1102,13 +1231,13 @@ def _confidence_caption(mapper: str) -> str:
         )
     if mapper == "wann":
         return (
-            "Each spot gets a reliability-weighted soft vote over the cell types; its "
+            "Each spatial cell gets a reliability-weighted soft vote over the cell types; its "
             "confidence is how one-hot that vote is — 1 (normalised Shannon entropy)."
         )
     return (
-        f"**{_MAPPER_LABELS.get(mapper, mapper)}** returns a soft spots × cell-types "
+        f"**{_MAPPER_LABELS.get(mapper, mapper)}** returns a soft cells × cell-types "
         "mapping and no confidence of its own, so what is shown is the **maximum "
-        "value per spot in that returned soft mapping**: how much of a spot's weight "
+        "value per cell in that returned soft mapping**: how much of a cell's weight "
         "the winning cell type holds."
     )
 
@@ -1186,7 +1315,7 @@ def _report_dashboard(
         )
     cards.append(
         _Card(
-            "Mapping confidence per spot",
+            "Mapping confidence per cell",
             _confidence,
             help=_confidence_caption(mapper),
             key=f"conf_{mapper}",
@@ -1694,7 +1823,7 @@ def _data_requirements_dialog() -> None:
 | **`X`** | raw counts, cells × genes | raw counts, "cells" × genes |
 | **`var_names`** | gene symbols, **UPPERCASE** and unique | gene symbols, **UPPERCASE** and unique |
 | additional **`obs`** | annotation columns optional | - |
-| **`obsm["spatial"]`** | - | `(n_spots, 2)` x/y coordinates |
+| **`obsm["spatial"]`** | - | `(n_cells, 2)` x/y coordinates |
 """)
 
     st.markdown(

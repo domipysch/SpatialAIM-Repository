@@ -1,5 +1,5 @@
 """Evaluation metrics for spatial-mapping predictions: cosine similarity,
-one-hotness, expression reconstruction, and biological/topological scores."""
+expression reconstruction, and biological/topological scores."""
 
 from .cossim import (
     CossimResult,
@@ -7,7 +7,6 @@ from .cossim import (
     compute_cossim,
     cosine_along_axis,
 )
-from .onehot import onehot_metrics
 from .reconstruction import (
     assemble_state_centroids,
     cossim_null_medians,
@@ -19,7 +18,6 @@ __all__ = [
     "compute_and_save_cossim",
     "compute_cossim",
     "cosine_along_axis",
-    "onehot_metrics",
     "assemble_state_centroids",
     "cossim_null_medians",
     "predict_expression",

@@ -94,6 +94,14 @@ def load_data_json(root: Path, k: int, name: str) -> dict | None:
         return json.load(f)
 
 
+def load_coherence_per_spot(root: Path, k: int) -> np.ndarray:
+    """Per-spot transcriptional coherence for one K: the share of each spot's ST
+    expression neighbours mapped to its own state (``coherence_per_spot.csv``,
+    in the spot order of the mapping)."""
+    df = pd.read_csv(data_dir(root, k) / "coherence_per_spot.csv")
+    return df["same_label_share"].to_numpy(dtype=np.float64)
+
+
 def load_cossim_distributions(root: Path, k: int) -> dict[str, dict[str, list]]:
     """Per-combo reconstruction cosine-similarity value lists for one K.
 

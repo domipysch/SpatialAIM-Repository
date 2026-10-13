@@ -553,18 +553,35 @@ export default async function (component) {
     // modal in Python (trigger "menu_state"); the browser's own context menu is
     // suppressed only then. Plotly has no right-click event, so the point under
     // the cursor is the last hovered one, and a legend entry is found from the
-    // event target (each legend item's datum carries its trace).
-    let hovered = null, lastMenu = 0
+    // elements under the cursor (each legend item's datum carries its trace).
+    // A touchpad's two-finger tap can send its mousedown with no pressed button
+    // (`buttons === 0`), which Plotly takes for a left drag: it covers the whole
+    // page with a ".dragcover" div (the contextmenu then targets that cover, not
+    // this plot) and unhovers on the slightest finger jitter. So listen on the
+    // document, locate the plot with elementsFromPoint (which sees through the
+    // cover), and fall back to the state hovered when the button went down.
+    let hovered = null, downHovered = null, lastMenu = 0
     gd.on("plotly_hover", (ev) => {
       const pt = ev.points && ev.points[0]
       hovered = pt ? stateOf(pt.data) : null
     })
     gd.on("plotly_unhover", () => { hovered = null })
-    gd.addEventListener("contextmenu", (ev) => {
+    const onDown = () => { downHovered = hovered }
+    const onMenu = (ev) => {
+      if (!gd.isConnected) {
+        document.removeEventListener("contextmenu", onMenu, true)
+        return
+      }
       if (!gd.__aimCtx.contextMenu) return
-      const item = ev.target && ev.target.closest && ev.target.closest(".legend .traces")
+      const under = document
+        .elementsFromPoint(ev.clientX, ev.clientY)
+        .filter((el) => gd.contains(el))
+      if (!under.length) return
+      const item = under.map((el) => el.closest(".legend .traces")).find(Boolean)
       const datum = item && item.__data__ && item.__data__[0]
-      const s = datum && datum.trace ? stateOf(datum.trace) : hovered
+      const s = datum && datum.trace
+        ? stateOf(datum.trace)
+        : (hovered !== null ? hovered : downHovered)
       if (s === null || s === undefined) return
       ev.preventDefault()
       // Plotly can re-dispatch the event; open the modal once per click.
@@ -572,7 +589,15 @@ export default async function (component) {
       if (now - lastMenu < 400) return
       lastMenu = now
       gd.__aimCtx.openMenu(s)
-    })
+    }
+    // A purge re-wires; drop the previous wiring's native listeners first.
+    if (gd.__aimMenuWiring) {
+      gd.removeEventListener("pointerdown", gd.__aimMenuWiring.onDown, true)
+      document.removeEventListener("contextmenu", gd.__aimMenuWiring.onMenu, true)
+    }
+    gd.__aimMenuWiring = { onDown, onMenu }
+    gd.addEventListener("pointerdown", onDown, true)
+    document.addEventListener("contextmenu", onMenu, true)
 
     // Points have no native double-click event, so time it ourselves.
     let timer = null, pending = null

@@ -3,8 +3,7 @@
 score them, and record which K each criterion selects (``k_selection.json``).
 
 ``k_comparison.csv`` holds the measured metrics *and* what they reduce to: one
-combined score per criterion, the overall score across criteria, and a ``pareto``
-flag. Reads the files each K's post-mapping analysis already writes
+combined score per criterion and the overall score across criteria. Reads the files each K's post-mapping analysis already writes
 (``cossim_summary.csv``, ``topology_metrics.json``, ``modularity_metrics.json``),
 so it runs after the K-loop with no recomputation — including the label-shuffle
 nulls those steps measured, which the GUI needs alongside the observed values.
@@ -58,25 +57,21 @@ def _cossim_cell(cs: pd.DataFrame, row: str, column: str) -> float:
 def collect_k_metrics(output_folder: Path, ks: list[int]) -> pd.DataFrame:
     """Gather the per-K comparison metrics into one DataFrame (one row per K, ascending).
 
-    Columns: ``k``, ``cossim_hard_norm_spot``, ``cossim_hard_norm_gene``,
-    ``cossim_hard_raw_spot``, ``cossim_hard_raw_gene``, ``nhood_mean_self_zscore``,
-    ``local_purity_zscore``, ``modularity_shared``, ``modularity_st_expression``,
-    ``mean_confidence``, plus the ``*_null`` label-shuffle baseline of every metric
-    that has one (the two z-scores are already measured against that shuffle, so
+    Columns: ``k``, ``cossim_hard_raw_spot``, ``cossim_hard_raw_gene``,
+    ``nhood_mean_self_zscore``, ``local_purity_zscore``, ``modularity_shared``,
+    ``modularity_st_expression``, plus the ``*_null`` label-shuffle baseline of
+    every metric that has one (the two z-scores are already measured against that shuffle, so
     their null is 0 by construction and is not repeated here).
     """
     rows = []
     for k in ks:
         data_dir = output_folder / f"k_{k:03d}" / "analysis" / "data"
 
-        cossim_norm_spot = cossim_norm_gene = np.nan
         cossim_raw_spot = cossim_raw_gene = np.nan
         cossim_raw_spot_null = cossim_raw_gene_null = np.nan
         cossim_path = data_dir / "cossim_summary.csv"
         if cossim_path.exists():
             cs = pd.read_csv(cossim_path, index_col=0)
-            cossim_norm_spot = _cossim_cell(cs, "hard-norm", "median_spot")
-            cossim_norm_gene = _cossim_cell(cs, "hard-norm", "median_gene")
             cossim_raw_spot = _cossim_cell(cs, "hard-raw", "median_spot")
             cossim_raw_gene = _cossim_cell(cs, "hard-raw", "median_gene")
             cossim_raw_spot_null = _cossim_cell(cs, "hard-raw", "median_spot_null")
@@ -97,16 +92,9 @@ def collect_k_metrics(output_folder: Path, ks: list[int]) -> pd.DataFrame:
         mod_shared = _finite(modularity.get("modularity_shared", np.nan))
         mod_st = _finite(modularity.get("modularity_st_expression", np.nan))
 
-        # Present only for mappers that define a confidence (nearest / wann);
-        # absent -> NaN -> the curve simply does not appear for this run.
-        confidence = _load_json(data_dir / "confidence_summary.json")
-        mean_conf = confidence.get("mean", np.nan)
-
         rows.append(
             {
                 "k": k,
-                "cossim_hard_norm_spot": cossim_norm_spot,
-                "cossim_hard_norm_gene": cossim_norm_gene,
                 "cossim_hard_raw_spot": cossim_raw_spot,
                 "cossim_hard_raw_gene": cossim_raw_gene,
                 "cossim_hard_raw_spot_null": cossim_raw_spot_null,
@@ -115,7 +103,6 @@ def collect_k_metrics(output_folder: Path, ks: list[int]) -> pd.DataFrame:
                 "local_purity_zscore": purity_z,
                 "modularity_shared": mod_shared,
                 "modularity_st_expression": mod_st,
-                "mean_confidence": mean_conf,
             }
         )
 
@@ -124,7 +111,7 @@ def collect_k_metrics(output_folder: Path, ks: list[int]) -> pd.DataFrame:
 
 def score_k_metrics(df: pd.DataFrame) -> pd.DataFrame:
     """``df`` with the K-selection columns appended: one combined score per
-    criterion, the ``overall`` score across them, and a ``pareto`` flag.
+    criterion and the ``overall`` score across them.
 
     The combined scores' own label-shuffle nulls are not carried here — only
     reconstruction has one, and the GUI recomputes it in memory for the chance
@@ -136,15 +123,14 @@ def score_k_metrics(df: pd.DataFrame) -> pd.DataFrame:
     for criterion in kselection.CRITERIA:
         out[criterion.key] = table[criterion.key].to_numpy()
     out["overall"] = kselection.overall(table)
-    out["pareto"] = kselection.pareto_mask(table)
     return out
 
 
 def select_k(output_folder: Path, df: pd.DataFrame) -> dict:
     """Write ``k_selection.json``: which K wins, per criterion and overall.
 
-    The proposal is the Pareto-optimal K plus the best K for each criterion and
-    for the harmonic mean across all of them, each with its score. Same
+    The proposal is the best K for each criterion and for the harmonic mean
+    across all of them, each with its score. Same
     computation the GUI's "Comparing K" card performs, so the CLI no longer
     hides it. Returns the proposal dict.
     """
@@ -154,11 +140,7 @@ def select_k(output_folder: Path, df: pd.DataFrame) -> dict:
         name: (None if hit is None else {"k": hit[0], "score": hit[1]})
         for name, hit in best.items()
     }
-    proposal = {
-        "pareto_ks": [int(k) for k in table.loc[kselection.pareto_mask(table), "k"]],
-        "best": best_json,
-        "criteria": {c.key: c.label for c in kselection.CRITERIA},
-    }
+    proposal = {"best": best_json}
     json_path = output_folder / "k_selection.json"
     with open(json_path, "w", encoding="utf-8") as fh:
         json.dump(proposal, fh, indent=2)
@@ -173,8 +155,7 @@ def select_k(output_folder: Path, df: pd.DataFrame) -> dict:
 def compare_k_runs(output_folder: Path, ks: list[int]) -> None:
     """Write ``k_comparison.csv`` at the run root: the swept K-runs' reconstruction
     cosine similarity, spatial organisation and mapping modularity, together with
-    the criterion scores those reduce to, the overall score and the Pareto flag
-    (the GUI renders the comparison plots from it on demand). The winning K per
+    the criterion scores those reduce to and the overall score (the GUI renders the comparison plots from it on demand). The winning K per
     criterion and overall goes to ``k_selection.json`` (see :func:`select_k`)."""
     output_folder = Path(output_folder)
     df = collect_k_metrics(output_folder, ks)

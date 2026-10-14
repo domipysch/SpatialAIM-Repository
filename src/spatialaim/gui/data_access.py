@@ -1,8 +1,8 @@
 """
 Pure on-disk readers for SpatialAIM sweep outputs.
 
-Everything here is cheap and side-effect-free (reads only); the Streamlit app
-wraps the expensive ones with ``st.cache_data``. A "run root" is the folder a
+Everything here is cheap and side-effect-free (reads only); ``loaders`` wraps
+the expensive ones with ``st.cache_data``. A "run root" is the folder a
 single mapper's sweep wrote into (``<output_dir>/<mapper>/``): it holds
 ``config.yaml``, ``start_clustering.h5ad``, ``k_comparison.{csv,png}`` and
 one ``k_<kkk>/`` folder per swept K.
@@ -17,6 +17,9 @@ from pathlib import Path
 import anndata as ad
 import numpy as np
 import pandas as pd
+import scanpy as sc
+import scipy.sparse as sp
+import yaml
 
 # MAPPING_CHOICES is the authoritative list of valid mapper names.
 from spatialaim import MAPPING_CHOICES
@@ -169,9 +172,6 @@ def load_spatial_lognorm(st_path: Path, genes: list[str]):
     """ST expression over ``genes`` (in that order) as a CSR float32 matrix
     (n_spots x len(genes)), normalised the way the sweep builds the all-gene
     lognorm layer: ``normalize_total(1e4)`` over all genes, then ``log1p``."""
-    import scanpy as sc
-    import scipy.sparse as sp
-
     adata = ad.read_h5ad(st_path)
     sc.pp.normalize_total(adata, target_sum=1e4)
     sc.pp.log1p(adata)
@@ -211,8 +211,6 @@ def load_start_cluster_names(root: Path) -> list[str] | None:
 def _config_value(output_dir: Path, field: str):
     """Best-effort read of ``field`` from any mapper's config.yaml under the output
     dir. Returns ``None`` if no config records it (configs are advisory only)."""
-    import yaml
-
     for cfg_path in Path(output_dir).glob("*/config.yaml"):
         try:
             with open(cfg_path) as f:

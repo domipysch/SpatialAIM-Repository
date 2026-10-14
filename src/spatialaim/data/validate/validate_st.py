@@ -1,9 +1,5 @@
-"""Validate one ST slice ``.h5ad`` against the SpatialAIM h5ad contract.
-
-Contract (see ``CLAUDE.md``): ``X`` raw counts, ``var_names`` unique and
-uppercase gene symbols, and ``obsm["spatial"]`` of shape ``(n_spots, 2)``.
-When an ``ST/index.csv`` row is supplied, its ``SpotCount`` / ``GeneCount``
-cells are cross-checked too.
+"""
+Validate one ST slice ``.h5ad`` and, if given, its segmentation mask.
 """
 
 from __future__ import annotations
@@ -20,16 +16,26 @@ from .common import (
     check_index_counts,
     load_X,
 )
+from .validate_segmentation import validate_segmentation
 
-__all__ = ["validate_st"]
+__all__ = ["validate_st", "segmentation_path_of"]
+
+SEGMENTATION_DIR_NAME = "Segmentation"
 
 
 def validate_st(
     h5ad_path: Path,
-    index_row: "pd.Series | None" = None,
+    index_row: pd.Series | None = None,
     label: str = "st",
-) -> tuple[list[str], list[str], "ad.AnnData | None"]:
-    """Return ``(errors, warns, adata)``; ``adata`` is None if it could not be read."""
+    segmentation_path: Path | None = None,
+) -> tuple[list[str], list[str], ad.AnnData | None]:
+    """``(errors, warns, adata)`` for the slice; ``adata`` is ``None`` if the
+    file cannot be read.
+
+    Checks ``obsm["spatial"]``, gene names (uppercase, unique) and that ``X``
+    holds raw counts. With an ``ST/index.csv`` row, also its counts. The mask
+    is ``segmentation_path``, or else the one the index row names.
+    """
     errors: list[str] = []
     warns: list[str] = []
 
@@ -61,11 +67,29 @@ def validate_st(
         )
     )
 
+    if segmentation_path is None:
+        segmentation_path = segmentation_path_of(h5ad_path, index_row)
+    if segmentation_path is not None:
+        errs, wrns = validate_segmentation(segmentation_path, adata, label)
+        errors.extend(errs)
+        warns.extend(wrns)
+
     return errors, warns, adata
 
 
-def _check_spatial(adata: "ad.AnnData", label: str) -> list[str]:
-    """The spatial coordinates every downstream spatial metric relies on."""
+def segmentation_path_of(h5ad_path: Path, index_row: pd.Series | None) -> Path | None:
+    """The mask named in the index row's ``Segmentation`` column (in
+    ``Segmentation/`` next to the h5ad), or ``None``."""
+    if index_row is None:
+        return None
+    name = str(index_row.get("Segmentation", "")).strip()
+    if not name:
+        return None
+    return Path(h5ad_path).parent / SEGMENTATION_DIR_NAME / name
+
+
+def _check_spatial(adata: ad.AnnData, label: str) -> list[str]:
+    """Error unless ``obsm["spatial"]`` exists with shape (spots, 2)."""
     if "spatial" not in adata.obsm:
         return [f"{label}: obsm['spatial'] is missing"]
     spatial = adata.obsm["spatial"]

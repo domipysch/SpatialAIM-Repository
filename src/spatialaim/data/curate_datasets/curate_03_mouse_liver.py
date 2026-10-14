@@ -12,7 +12,8 @@ the figshare project "MERFISH mouse comparison study"
 source named in the STAMapper data-availability statement, used here in place of
 the STAMapper Google Drive copy.
 
-Four downloads (~440 MB); both sides then reproduce bit-exactly.
+Four downloads (~440 MB); both sides then reproduce bit-exactly. Plus three files read
+out of the Vizgen run export zip for the segmentation mask (see ST below).
 
 ------------------------------------------------------------------------------
 scRNA  03_mouse-liver.h5ad   —  2321 x 20138, Tabula Muris Senis droplet liver
@@ -71,6 +72,16 @@ Curation:
            vs ELTD1/4631405K08RIK/DARC/SDPR/IGJ); 01_Datasets_Used has the older
            set, so the annotated file is the one to follow.
   * obsm["spatial"] = the raw file's ``obsm["spatial"]``, float64, verbatim
+  * obs["segmentation_id"], uns["segmentation_pixel_size_um"] = 0.25 and the
+           mask ST/Segmentation/<name>.tif: the cell outlines of the Vizgen run
+           export on figshare (https://figshare.com/articles/dataset/RawData/19310711,
+           MsLiver_Cellbound_VZG116_V1_JH_09-18-2021.zip). Only cell_boundaries.geojson, cell_metadata.csv and
+           micron_to_mosaic_pixel_transform.csv are read out of the zip (HTTP
+           range requests), not the whole archive. Feature i of the geojson is
+           row i of cell_metadata.csv = our obs_name; the polygons are in mosaic
+           pixels (9.259 per um), like obsm["spatial"], and match obs
+           min/max_x/y exactly (asserted). Rasterised at 0.25 um per pixel,
+           holes cut out of their own cell.
 
 The annotated object's own X (log-normalised) and spatial (rescaled) are *not*
 used — only its labels and gene names.
@@ -95,7 +106,7 @@ import anndata as ad
 import numpy as np
 import pandas as pd
 
-from . import _common
+from . import _common, _segmentation
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +125,9 @@ ST_ANN_BYTES = 53_756_018
 METADATA_MEMBER = "symphony/MACAliver_10x_metadata.csv"
 
 SC_EXPECTED = (2321, 20138)
+EXPORT_URL = f"{FIGSHARE}/37019053"  # MsLiver_Cellbound_VZG116_V1_JH_09-18-2021.zip
+MASK_PIXEL_UM = 0.25
+
 ST_EXPECTED = (34217, 307)
 
 # The 12 TMS-native obs columns 01_Datasets_Used keeps, in its order.
@@ -226,7 +240,7 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # ST
 # --------------------------------------------------------------------------- #
-def build_st(tmp_dir: Path, out_path: Path) -> None:
+def build_st(tmp_dir: Path, st_dir: Path) -> None:
     logger.info("ST %s — MERFISH mouse liver", NAME)
     raw_file = _common.download(
         ST_RAW_URL,
@@ -264,7 +278,16 @@ def build_st(tmp_dir: Path, out_path: Path) -> None:
         adata.obs["celltype"].cat.categories.size,
         adata.obs["celtype"].cat.categories.size,
     )
-    _common.write(adata, out_path)
+
+    outlines, px_per_um = _segmentation.vizgen_export_outlines(
+        EXPORT_URL, tmp_dir / "vizgen_export", adata.obs
+    )
+    mask, seg_id = _segmentation.rasterize(
+        outlines, MASK_PIXEL_UM * px_per_um, margin=50.0
+    )
+    _segmentation.write_mask(_segmentation.mask_path(st_dir, NAME), mask)
+    _segmentation.annotate(adata, seg_id, MASK_PIXEL_UM)
+    _common.write(adata, st_dir / f"{NAME}.h5ad")
 
 
 # --------------------------------------------------------------------------- #
@@ -275,7 +298,7 @@ def main() -> None:
 
     with _common.staging(args.out_dir, NAME) as tmp_dir:
         build_scrna(tmp_dir, sc_dir / f"{NAME}.h5ad")
-        build_st(tmp_dir, st_dir / f"{NAME}.h5ad")
+        build_st(tmp_dir, st_dir)
 
     logger.info("%s done", NAME)
 

@@ -10,8 +10,8 @@ analysis" (https://www.nature.com/articles/s41467-023-43458-x). Both sides come
 from that study: the scFFPE-seq reference from its GEO series, the Xenium slice
 from the 10x Genomics preview dataset the paper is built on.
 
-Three downloads (~180 MB). Both sides reproduce essentially exactly; see the
-note on the ST cell order below.
+Four downloads (~500 MB, 316 MB of it the segmentation). Both sides reproduce
+essentially exactly; see the note on the ST cell order below.
 
 ------------------------------------------------------------------------------
 scRNA  09_human-breast-cancer.h5ad   —  27472 x 37133, Chromium Flex scFFPE-seq
@@ -39,6 +39,7 @@ ST  09_human-breast-cancer.h5ad   —  167780 x 313, Xenium
   https://www.10xgenomics.com/products/xenium-in-situ/preview-dataset-human-breast
     Xenium_FFPE_Human_Breast_Cancer_Rep1_cell_feature_matrix.h5  (12 MB)
     Xenium_FFPE_Human_Breast_Cancer_Rep1_cells.csv.gz            (8 MB)
+    Xenium_FFPE_Human_Breast_Cancer_Rep1_cells.zarr.zip          (316 MB)
   annotation  GSE243275_Barcode_Cell_Type_Matrices.xlsx,
               sheet "Xenium R1 Fig1-5 (supervised)"
 
@@ -56,6 +57,13 @@ Curation:
   * obsm["spatial"] = ``x_centroid``, ``y_centroid`` from cells.csv.gz as
            float32. 01_Datasets_Used's values differ by at most 2.4e-4 um,
            which is float32 rounding at these magnitudes.
+  * obs["segmentation_id"], uns["segmentation_pixel_size_um"] = 0.2125 and the
+           mask ST/Segmentation/09_human-breast-cancer.tif: Xenium's own cell
+           mask, cells.zarr.zip masks/1 (25778 x 35416, 0.2125 um per pixel),
+           copied as is. Its labels are the Xenium cell_id = int(obs_name), so
+           segmentation_id = cell_id. Xenium 1.0.1 segments nuclei (DAPI) only;
+           a "cell" is its nucleus expanded by up to 15 um until it meets a
+           neighbour (masks/0, the nuclei, is not used).
 
 ------------------------------------------------------------------------------
 Usage
@@ -65,7 +73,8 @@ Usage
 
 Sources are downloaded to a temporary folder below --out-dir and deleted again.
 Set SPATIALAIM_KEEP_DOWNLOADS=1 to keep (and on a re-run reuse) them in
-<out-dir>/_downloads/09_human-breast-cancer instead. Needs ~4 GB of free RAM.
+<out-dir>/_downloads/09_human-breast-cancer instead. Needs ~4 GB of free RAM;
+the 3.6 GB mask is copied band by band, never held whole.
 """
 
 import logging
@@ -77,7 +86,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csc_matrix, csr_matrix
 
-from . import _common
+from . import _common, _segmentation
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +108,10 @@ ST_COUNTS_URL = f"{XENIUM}_cell_feature_matrix.h5"
 ST_COUNTS_BYTES = 12_148_885
 ST_CELLS_URL = f"{XENIUM}_cells.csv.gz"
 ST_CELLS_BYTES = 7_930_261
+ST_MASKS_URL = f"{XENIUM}_cells.zarr.zip"
+ST_MASKS_BYTES = 315_640_853
+MASK_PIXEL_UM = 0.2125
+CELL_MASK = "masks/1"  # masks/0 = nuclei
 
 SC_SHEET = "scFFPE-Seq"
 ST_SHEET = "Xenium R1 Fig1-5 (supervised)"
@@ -192,7 +205,40 @@ def build_scrna(tmp_dir: Path, workbook: Path, out_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # ST
 # --------------------------------------------------------------------------- #
-def build_st(tmp_dir: Path, workbook: Path, out_path: Path) -> None:
+def _copy_cell_mask(zarr_zip: Path, out_path: Path, n_cells: int) -> None:
+    """Xenium's cell mask -> tif, band by band; asserts every cell_id has pixels."""
+    import zarr
+
+    group = zarr.open_group(zarr.storage.ZipStore(str(zarr_zip), mode="r"), mode="r")
+    transform, masks = group["masks/homogeneous_transform"], group[CELL_MASK]
+    if not isinstance(transform, zarr.Array) or not isinstance(masks, zarr.Array):
+        raise ValueError(f"{zarr_zip.name} has no masks/ arrays")
+    scale = float(np.asarray(transform[:])[0, 0])
+    if abs(scale - 1 / MASK_PIXEL_UM) > 1e-4:
+        raise ValueError(f"mask scale {scale} px per um, expected {1 / MASK_PIXEL_UM}")
+    rows, cols = masks.shape
+    tile = _segmentation.TILE
+    counts = np.zeros(n_cells + 1, dtype=np.int64)
+
+    def tiles():
+        for r0 in range(0, rows, tile):
+            band = np.asarray(masks[r0 : r0 + tile, :])
+            if band.max() > n_cells:
+                raise ValueError(f"mask label {band.max()} > {n_cells} cells")
+            counts[:] += np.bincount(band.ravel(), minlength=n_cells + 1)
+            for c0 in range(0, cols, tile):
+                part = np.zeros((tile, tile), dtype=np.uint32)
+                piece = band[:, c0 : c0 + tile]
+                part[: piece.shape[0], : piece.shape[1]] = piece
+                yield part
+
+    logger.info("  mask    %d x %d px (%s)", rows, cols, CELL_MASK)
+    _segmentation.write_mask(out_path, tiles=tiles(), shape=(rows, cols))
+    if (counts[1:] == 0).any():
+        raise ValueError(f"{int((counts[1:] == 0).sum())} cell_ids have no mask pixel")
+
+
+def build_st(tmp_dir: Path, workbook: Path, st_dir: Path) -> None:
     logger.info("ST %s — Xenium human breast cancer, replicate 1", NAME)
     counts_file = _common.download(
         ST_COUNTS_URL,
@@ -203,6 +249,11 @@ def build_st(tmp_dir: Path, workbook: Path, out_path: Path) -> None:
         ST_CELLS_URL,
         tmp_dir / "Xenium_Rep1_cells.csv.gz",
         expected_bytes=ST_CELLS_BYTES,
+    )
+    masks_file = _common.download(
+        ST_MASKS_URL,
+        tmp_dir / "Xenium_Rep1_cells.zarr.zip",
+        expected_bytes=ST_MASKS_BYTES,
     )
 
     matrix, barcodes, names, types = _read_10x_h5(counts_file)
@@ -234,7 +285,13 @@ def build_st(tmp_dir: Path, workbook: Path, out_path: Path) -> None:
     ).astype(np.float32)
     _check_shape(adata, ST_EXPECTED, "ST")
     logger.info("  cellType: %d types", adata.obs["cellType"].cat.categories.size)
-    _common.write(adata, out_path)
+
+    cell_id = adata.obs_names.astype(np.int64).to_numpy()
+    if not np.array_equal(cell_id, np.arange(1, adata.n_obs + 1)):
+        raise ValueError("the cells are no longer cell_id 1..N in order")
+    _copy_cell_mask(masks_file, _segmentation.mask_path(st_dir, NAME), adata.n_obs)
+    _segmentation.annotate(adata, cell_id, MASK_PIXEL_UM)
+    _common.write(adata, st_dir / f"{NAME}.h5ad")
 
 
 # --------------------------------------------------------------------------- #
@@ -250,7 +307,7 @@ def main() -> None:
             expected_bytes=WORKBOOK_BYTES,
         )
         build_scrna(tmp_dir, workbook, sc_dir / f"{NAME}.h5ad")
-        build_st(tmp_dir, workbook, st_dir / f"{NAME}.h5ad")
+        build_st(tmp_dir, workbook, st_dir)
 
     logger.info("%s done", NAME)
 

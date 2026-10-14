@@ -44,6 +44,9 @@ dependencies = [
     "igraph>=0.11",
     "leidenalg>=0.10",
     "umap-learn>=0.5",
+    "tifffile>=2024.8",  # cell segmentation masks
+    "zarr>=2.16",  # reading large masks in bands
+    "scikit-image>=0.22",  # shape-consistency metric (regionprops), rasterising masks
     # GUI
     "streamlit>=1.40",
     "plotly>=5.20",
@@ -51,7 +54,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-data = ["matplotlib>=3.9", "scikit-learn>=1.4", "rdata>=1.1"]
+data = ["matplotlib>=3.9", "scikit-learn>=1.4", "rdata>=1.1", "h5py>=3.10"]
 dev = [
     "pytest>=8",
     "black>=24",

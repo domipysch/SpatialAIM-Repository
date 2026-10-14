@@ -1,37 +1,26 @@
-"""Run configuration for SpatialAIM: the ``SpatialAIMConfig`` knobs, the mapper registry, and the
-``build_mapper`` factory that turns a config into a ``SpotStateMapper``."""
+"""
+Run configuration for SpatialAIM
+"""
 
 from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
 from spatialaim.reference_aligners.registry import REFERENCE_ALIGNERS
+from .mapping import (
+    SpotStateMapper,
+    NearestCentroidMapper,
+    ReferenceMapper,
+    WANNMapper,
+)
 
-if TYPE_CHECKING:
-    from .mapping import SpotStateMapper
-
-# In-process mapping strategy names. Kept as plain strings (not derived from the
-# mapper classes) so ``MAPPING_CHOICES`` — used to build the CLI parser — needs no
-# import of the mapper modules. ``build_mapper`` below asserts these stay in sync
-# with the classes' own ``.name``.
 _INPROCESS_METHODS = ("nearest_centroid", "wann")
-# External reference aligners, all served by ReferenceMapper and selected by name.
-# Sourced from the aligner registry so adding one there is the only edit needed.
 _REFERENCE_METHODS = tuple(REFERENCE_ALIGNERS)
-
 MAPPING_CHOICES = _INPROCESS_METHODS + _REFERENCE_METHODS
 
-# Linkage choices for the agglomeration tree over the start clusters, first
-# entry being the default. Single source of truth: the CLI parser and the GUI
-# sidebar offer these, and ``tree.build_agglomeration_tree`` validates against them.
 LINKAGE_METHODS = ("average", "ward")
 
 
 @dataclass
 class SpatialAIMConfig:
-    """Per-run knobs for the SpatialAIM sweep: mapping choice, start clusters,
-    hyperparameters, and K range."""
 
     mapping: str = "nearest_centroid"
     leiden_resolution: float = 3.0
@@ -46,17 +35,12 @@ class SpatialAIMConfig:
     k_max: int | None = None
     k_step: int = 1
 
-    def build_mapper(self) -> "SpotStateMapper":
+    def build_mapper(self) -> SpotStateMapper:
         """Build the ``SpotStateMapper`` named by ``self.mapping``.
 
         The mapper modules are imported here, lazily, so merely reading
         ``SpatialAIMConfig``/``MAPPING_CHOICES`` does not import them.
         """
-        from .mapping import (
-            NearestCentroidMapper,
-            ReferenceMapper,
-            WANNMapper,
-        )
 
         inprocess: dict[str, type[SpotStateMapper]] = {
             NearestCentroidMapper.name: NearestCentroidMapper,

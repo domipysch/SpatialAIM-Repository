@@ -1,4 +1,5 @@
-"""User-assigned names for the computed cell types, one set per K.
+"""
+User-assigned names for the computed cell types, one set per K.
 
 A name belongs to the ``(output_dir, K)`` pair, not to a mapper: every mapper
 under one output dir cuts the same reference tree, so "cell type 3 at K = 7" is

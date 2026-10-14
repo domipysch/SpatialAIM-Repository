@@ -174,7 +174,7 @@ def _human(n: int | None) -> str:
 # Writing
 # --------------------------------------------------------------------------- #
 def uppercase(genes: Iterable[str]) -> list[str]:
-    """The project-wide gene-name convention (see prepare/normalize_gene_names.py)."""
+    """Gene names in the project-wide convention: uppercase."""
     return [str(g).upper() for g in genes]
 
 

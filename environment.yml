@@ -15,15 +15,19 @@ dependencies:
   - scipy==1.18.0
   - pyyaml==6.0.3
   - anndata==0.12.7
-  - scanpy==1.11.5          # Leiden over-clustering, UMAP, analysis.biology
+  - scanpy==1.11.5          # Leiden over-clustering, UMAP, analysis.coherence
+  - tifffile                # cell segmentation masks
+  - zarr                    # reading large masks in bands
+  - scikit-image            # shape-consistency metric (regionprops); rasterising masks at curation
   # --- data preparation only ---
   - matplotlib==3.9.2
   - rdata                   # read R .Rds sources (curate_datasets/curate_05_mouse_embryo)
+  - h5py                    # read HDF5 sources (curate_datasets 01, 02, 09)
   - pip:
     # --- core (pip-only) ---
-    - igraph                # modularity (metrics.biology)
+    - igraph                # modularity (metrics.modularity)
     - leidenalg             # Leiden over-clustering
-    - squidpy               # spatial metrics (analysis.topology)
+    - squidpy               # spatial metrics (analysis.spatial_organization)
     # --- GUI only ---
     - streamlit
     - plotly

@@ -64,7 +64,8 @@ DATA/
 │   └── <scName>.h5ad
 ├── ST/
 │   ├── index.csv          # one row per ST dataset
-│   └── <stName>.h5ad
+│   ├── <stName>.h5ad
+│   └── Segmentation/      # optional cell segmentation masks (index.csv column `Segmentation`)
 └── pairs.csv              # links scRNA ↔ ST: PairID, scName, stName, …
 ```
 
@@ -101,7 +102,7 @@ Please install the corresponding conda environments on your computer.
 Check whether your data meets the main requirements.
 
 ```bash
-spatialaim validate --scdata path/to/sc.h5ad --stdata path/to/st.h5ad
+spatialaim validate --scdata path/to/sc.h5ad --stdata path/to/st.h5ad [--segmentation path/to/mask.tif]
 ```
 
 or for every pair of a `pairs.csv` laid out as in [Batch Processing](#batch-processing):
@@ -119,6 +120,10 @@ Validations per dataset:
   - raw count matrices (no NaN values, np negative values, integer-looking, not library-size normalized or log1p'd)
   - unique uppercase gene names
   - `obsm["spatial"]` of shape `(n_spots, 2)`.
+- Optional cell segmentation mask of an ST slice
+  - a 2D `.tif`/`.tiff` of dtype `uint32`: `0` = background, cells labelled `1..max` without gaps (labels without a cell in the h5ad are fine)
+  - the ST h5ad carries the integer `obs["segmentation_id"]` (each cell's mask label, `0` = no segmentation): non-negative, non-zero ids unique and present in the mask
+  - `uns["segmentation_pixel_size_um"]` (µm per pixel) is optional - a warning if missing
 - Per pair
   - the size of the shared-gene intersection
   - whether any ST spot is left all-zero by it.
@@ -135,6 +140,7 @@ spatialaim gui [--server_port 8501]
 Open the printed URL (default http://localhost:8501), set the inputs, pick one or multiple mapper(s), and click **Run**.
 As soon as both `.h5ad` paths are set, the GUI runs the same checks as [`spatialaim validate`](#validate-a-dataset-pair-spatialaim-validate) on that pair: a clean pair is confirmed with a tick in the sidebar, any error or warning is shown in a dialog you can close to continue anyway.
 The GUI writes each mapper's sweep to  `<output_dir>/<mapper>/`. The results using each mapper are visualized in different tabs. When having run multiple mappers, also a "Compare" tab appears.
+An optional **Segmentation path** (the ST slice's cell segmentation mask, see the sidebar's *Info*) is validated with the pair and passed to the runs; their mapper tabs then get a "Shape features" card (shape consistency and the cells' area / eccentricity / solidity per cell type), and the cell-type modal a "Shape features" view. Without it the GUI is unchanged.
 
 ### Run via CLI (`spatialaim run`)
 
@@ -161,6 +167,7 @@ Give such runs their own `--output_dir`: a run root is named after the mapper al
 spatialaim run --scdata path/to/sc.h5ad \
 		--stdata path/to/st.h5ad \
 		--output_dir path/to/out_dir \
+		[--segmentation path/to/mask.tif] \
 		[--mapping nearest_centroid|wann|tangram|tacco|dot] \
 		[--linkage_method average|ward] \
 		[--start_from_annotation <obs_column>] \
@@ -169,7 +176,9 @@ spatialaim run --scdata path/to/sc.h5ad \
 		[--logging verbose]
 ```
 
-**Batch mode (all pairs in `pairs.csv`):**
+`--segmentation` is the ST slice's optional cell segmentation mask; with it the analysis also scores **shape consistency** (column `shape` of `k_comparison.csv`), without it that score is NaN.
+
+**Batch mode (all pairs in `pairs.csv`):** each slice's mask is taken from the `Segmentation` column of `ST/index.csv` (file in `ST/Segmentation/`), if set.
 
 ```bash
 spatialaim run --pairs_csv path/to/pairs.csv \
@@ -188,18 +197,20 @@ Each pair is written to `<out_dir>/<PairID>_<scName>__<stName>/`.
 
 **Output layout** (per pair):
 
-- `<mapping>/config.yaml` — the run configuration.
-- `start_clustering.h5ad` — per-cell start cluster (`start_cluster` id + `start_cluster_name`); computed once, reused for every `K`.
-- `k_<kkk>/` — one folder per `K`:
-	- `spot_to_state_mapping_soft.h5ad` — the spot→state matrix `P` (spots × `K`);
-	    carries `obs["mapping_confidence"]` when the mapper defines one.
-	- `spot_to_state_mapping.csv` — `P` as CSV (for eyeballing).
-	- `start_cluster_to_state.csv` — the start-cluster→state tree cut.
-	- `analysis/data/` — machine-readable metrics for that `K` (no figures; the GUI renders them).
-- `k_comparison.csv` — one row per `K`: the measured metrics, plus each criterion's combined
-    score (harmonic mean of its two curves) and the overall score across criteria.
-- `k_selection.json` — the proposal: the best `K` per criterion and overall, each with its
-    score. Same computation the GUI's "Choose K" card shows.
+```
+<out_dir>/
+├── reference_scaffold.h5ad        # cached reference preparation, shared by all mappers
+└── <mapping>/                     # one folder per mapper, e.g. nearest_centroid/
+    ├── config.yaml                # the run's settings
+    ├── start_clustering.h5ad      # each reference cell's start cluster
+    ├── cell_shape_features.csv    # only with a segmentation mask: area, eccentricity, solidity per cell
+    ├── k_<kkk>/                   # one folder per K
+    │   ├── spot_to_state_mapping_soft.h5ad   # the mapping P (spots × K), plus confidence if the mapper has one
+    │   ├── start_cluster_to_state.csv        # which state each start cluster belongs to
+    │   └── analysis/data/                    # the metrics for this K (the GUI plots them)
+    ├── k_comparison.csv           # one row per K: all metrics and the K-selection scores
+    └── k_selection.json           # the suggested K, overall and per criterion
+```
 
 **Sample-dataset example:**
 

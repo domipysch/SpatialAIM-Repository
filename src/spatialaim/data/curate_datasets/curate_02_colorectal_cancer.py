@@ -284,7 +284,7 @@ def _area(ring: np.ndarray) -> float:
     return 0.5 * abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
 
 
-def _outlines(vizgen_dir: Path, meta: pd.DataFrame) -> list["list[np.ndarray] | None"]:
+def _outlines(vizgen_dir: Path, meta: pd.DataFrame) -> list[list[np.ndarray] | None]:
     """Each cell's boundary polygon (um), in meta's row order."""
     folder = vizgen_dir / CELL_BOUNDARIES
     groups = meta.groupby("fov").groups
@@ -295,7 +295,7 @@ def _outlines(vizgen_dir: Path, meta: pd.DataFrame) -> list["list[np.ndarray] | 
             f"e.g. feature_data_{missing[0]}.hdf5"
         )
     row = {entity: i for i, entity in enumerate(meta.index)}
-    outlines: list["list[np.ndarray] | None"] = [None] * len(meta)
+    outlines: list[list[np.ndarray] | None] = [None] * len(meta)
     n_split = 0
     for fov, entities in groups.items():
         with h5py.File(folder / f"feature_data_{fov}.hdf5", "r") as handle:

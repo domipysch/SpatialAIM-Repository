@@ -1,16 +1,6 @@
-"""Validate the optional cell segmentation mask of an ST slice.
-
-Contract (see ``CLAUDE.md``):
-
-* the mask is a 2D ``.tif``/``.tiff`` of dtype ``uint32``; ``0`` is background,
-  the cells carry the labels ``1..max`` - every value ``0..max`` occurs
-* the ST h5ad carries the integer obs column ``segmentation_id``: the mask label
-  of each cell, ``0`` = no segmentation; non-zero ids are unique and occur in the
-  mask. Mask labels without a cell in the h5ad are allowed (filtered cells).
-* ``uns["segmentation_pixel_size_um"]`` (um per pixel) is optional
-
-The mask is read in bands of rows, so a mask of several GB is never held in
-memory at once.
+"""
+Validate an ST slice's optional cell segmentation mask and its link to the
+slice via ``obs["segmentation_id"]``.
 """
 
 from __future__ import annotations
@@ -26,15 +16,21 @@ __all__ = ["validate_segmentation", "SEGMENTATION_ID", "PIXEL_SIZE_KEY"]
 SEGMENTATION_ID = "segmentation_id"
 PIXEL_SIZE_KEY = "segmentation_pixel_size_um"
 _SUFFIXES = (".tif", ".tiff")
-_BAND = 1024  # rows per read
+_BAND = 1024  # mask rows read at a time, so large masks never sit in memory
 
 
 def validate_segmentation(
     mask_path: Path,
-    adata_st: "ad.AnnData",
+    adata_st: ad.AnnData,
     label: str = "st",
 ) -> tuple[list[str], list[str]]:
-    """Return ``(errors, warns)`` for the mask and its link to ``adata_st``."""
+    """``(errors, warns)`` for the mask and the slice's link to it.
+
+    The mask must be a 2D uint32 ``.tif``/``.tiff`` with background 0 and cells
+    1..max without gaps. ``obs["segmentation_id"]`` must be integer, 0 for
+    unsegmented cells, with unique non-zero ids that occur in the mask. A
+    missing pixel size is only a warning.
+    """
     mask_path = Path(mask_path)
     errors: list[str] = []
     warns: list[str] = []
@@ -53,8 +49,9 @@ def validate_segmentation(
     return errors, warns
 
 
-def _mask_labels(mask_path: Path, label: str) -> tuple["np.ndarray | None", list[str]]:
-    """The sorted unique labels of the mask, or None if it cannot be checked."""
+def _mask_labels(mask_path: Path, label: str) -> tuple[np.ndarray | None, list[str]]:
+    """The mask's sorted unique labels (``None`` if it cannot be read) and the
+    errors about its file, shape, dtype and labels."""
     import tifffile
     import zarr
 
@@ -98,11 +95,12 @@ def _mask_labels(mask_path: Path, label: str) -> tuple["np.ndarray | None", list
 
 
 def _check_segmentation_id(
-    adata_st: "ad.AnnData",
-    labels: "np.ndarray | None",
+    adata_st: ad.AnnData,
+    labels: np.ndarray | None,
     label: str,
 ) -> tuple[list[str], list[str]]:
-    """``obs["segmentation_id"]``: integer, >= 0, non-zero ids unique and in the mask."""
+    """``obs["segmentation_id"]``: integer, >= 0, non-zero ids unique and in
+    the mask; a warning for how many cells are unsegmented (id 0)."""
     if SEGMENTATION_ID not in adata_st.obs:
         return [
             f"{label}: a segmentation mask is given but obs['{SEGMENTATION_ID}'] is missing"
@@ -146,10 +144,9 @@ def _check_segmentation_id(
     return errors, warns
 
 
-def _check_pixel_size(
-    adata_st: "ad.AnnData", label: str
-) -> tuple[list[str], list[str]]:
-    """``uns["segmentation_pixel_size_um"]`` is optional; if set, a positive number."""
+def _check_pixel_size(adata_st: ad.AnnData, label: str) -> tuple[list[str], list[str]]:
+    """``uns["segmentation_pixel_size_um"]``: a warning if missing, an error
+    if not a positive number."""
     if PIXEL_SIZE_KEY not in adata_st.uns:
         return [], [
             f"{label}: uns['{PIXEL_SIZE_KEY}'] not set - cell sizes are shown in "

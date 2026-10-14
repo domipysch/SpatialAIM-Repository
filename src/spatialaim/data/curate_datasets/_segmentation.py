@@ -47,7 +47,7 @@ def mask_path(st_dir: Path, st_name: str) -> Path:
 # Rasterising polygon outlines
 # --------------------------------------------------------------------------- #
 def rasterize(
-    outlines: Sequence["list[np.ndarray] | None"],
+    outlines: Sequence[list[np.ndarray] | None],
     step: float,
     margin: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -114,10 +114,10 @@ def _compact(mask: np.ndarray, label: np.ndarray) -> tuple[np.ndarray, np.ndarra
 # --------------------------------------------------------------------------- #
 def write_mask(
     path: Path,
-    mask: "np.ndarray | None" = None,
+    mask: np.ndarray | None = None,
     *,
-    tiles: "Iterator[np.ndarray] | None" = None,
-    shape: "tuple[int, int] | None" = None,
+    tiles: Iterator[np.ndarray] | None = None,
+    shape: tuple[int, int] | None = None,
 ) -> None:
     """Tiled, zlib-compressed BigTIFF via a .part file. Either a full ``mask``,
     or ``tiles`` (TILE x TILE uint32 tiles in row-major order) plus ``shape``."""
@@ -148,7 +148,7 @@ def write_mask(
 
 
 def annotate(
-    adata: ad.AnnData, seg_id: Iterable[int], pixel_size_um: "float | None"
+    adata: ad.AnnData, seg_id: Iterable[int], pixel_size_um: float | None
 ) -> None:
     """Add ``obs["segmentation_id"]`` and, if known, the mask's pixel size."""
     adata.obs[SEGMENTATION_ID] = np.asarray(seg_id, dtype=np.int64)

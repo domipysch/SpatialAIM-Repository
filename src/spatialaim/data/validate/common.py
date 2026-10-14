@@ -1,9 +1,6 @@
-"""Shared helpers for the scRNA / ST / pair validators.
-
-Every check returns ``(errors, warns)`` as plain string lists; the caller
-(:mod:`spatialaim.data.validate.runner`) collects and prints them. ``errors`` mean the
-dataset violates the h5ad contract in ``CLAUDE.md`` and SpatialAIM will fail on it;
-``warns`` are index.csv mismatches or count-matrix suspicions.
+"""
+Checks shared by the validators. Each returns its findings as lists of
+messages: errors (SpatialAIM will fail) and warnings.
 """
 
 from __future__ import annotations
@@ -27,46 +24,48 @@ __all__ = [
 ]
 
 
-def colored(text: str, status: str) -> str:
-    codes = {"OK": "\033[92m", "WARN": "\033[93m", "ERROR": "\033[91m"}
-    reset = "\033[0m"
-    code = codes.get(status, "")
-    return f"{code}{text}{reset}"
+# --------------------------------------------------------------------------- #
+# Checks
+# --------------------------------------------------------------------------- #
+def check_gene_names_uppercase(adata: ad.AnnData, label: str) -> list[str]:
+    """Error if any gene name is not uppercase."""
+    non_upper = [g for g in adata.var_names if g != g.upper()]
+    if non_upper:
+        return [
+            f"{label}: {len(non_upper)} gene names are not uppercase "
+            f"(e.g. {non_upper[:3]}) - uppercase them, e.g. "
+            f"`adata.var_names = adata.var_names.str.upper()`"
+        ]
+    return []
 
 
-def status_of(errors: list[str], warns: list[str]) -> str:
-    if errors:
-        return "ERROR"
-    return "WARN" if warns else "OK"
+def check_gene_names_unique(adata: ad.AnnData, label: str) -> list[str]:
+    """Error if any gene name occurs twice."""
+    counts = pd.Series(adata.var_names.tolist()).value_counts()
+    dups = counts[counts > 1]
+    if not dups.empty:
+        examples = dups.index.tolist()[:3]
+        return [
+            f"{label}: {len(dups)} duplicate gene name(s) "
+            f"(e.g. {examples}) - rename or remove duplicates"
+        ]
+    return []
 
 
-def is_intable(x) -> bool:
-    try:
-        if isinstance(x, (int, np.integer)):
-            return True
-        if isinstance(x, str):
-            int(x)
-            return True
-    except Exception:
-        return False
-    return False
-
-
-def to_int_safe(x) -> int:
-    if is_intable(x):
-        return int(x)
-    raise ValueError("not intable")
-
-
-def load_X(adata: ad.AnnData) -> np.ndarray:
-    X = adata.X
-    if issparse(X):
-        return X.toarray()
-    return np.asarray(X)
+def check_count_matrix(X: np.ndarray, label: str) -> tuple[list[str], list[str]]:
+    """``(errors, warns)``: NaN or negative values are errors; signs that ``X``
+    is not raw counts are warnings (see :func:`raw_count_sanity`)."""
+    errors: list[str] = []
+    if np.isnan(X).any():
+        errors.append(f"{label}: NaN values in X")
+    elif (X < 0).any():
+        errors.append(f"{label}: negative values in X")
+    return errors, raw_count_sanity(X, label)
 
 
 def raw_count_sanity(X: np.ndarray, label: str) -> list[str]:
-    """Warn if X looks normalized / log-transformed / partly empty."""
+    """Warnings if ``X`` looks normalised, log-transformed, non-integer, or has
+    all-zero rows."""
     warns: list[str] = []
     row_sums = X.sum(axis=1)
     if row_sums.mean() > 0:
@@ -86,48 +85,15 @@ def raw_count_sanity(X: np.ndarray, label: str) -> list[str]:
     return warns
 
 
-def check_gene_names_uppercase(adata: ad.AnnData, label: str) -> list[str]:
-    non_upper = [g for g in adata.var_names if g != g.upper()]
-    if non_upper:
-        return [
-            f"{label}: {len(non_upper)} gene names are not uppercase "
-            f"(e.g. {non_upper[:3]}) - run "
-            f"`python -m spatialaim.data.prepare.normalize_gene_names`"
-        ]
-    return []
-
-
-def check_gene_names_unique(adata: ad.AnnData, label: str) -> list[str]:
-    counts = pd.Series(adata.var_names.tolist()).value_counts()
-    dups = counts[counts > 1]
-    if not dups.empty:
-        examples = dups.index.tolist()[:3]
-        return [
-            f"{label}: {len(dups)} duplicate gene name(s) "
-            f"(e.g. {examples}) - rename or remove duplicates"
-        ]
-    return []
-
-
-def check_count_matrix(X: np.ndarray, label: str) -> tuple[list[str], list[str]]:
-    """NaN / negative values are errors, the raw-count heuristics are warnings."""
-    errors: list[str] = []
-    if np.isnan(X).any():
-        errors.append(f"{label}: NaN values in X")
-    elif (X < 0).any():
-        errors.append(f"{label}: negative values in X")
-    return errors, raw_count_sanity(X, label)
-
-
 def check_index_counts(
-    index_row: "pd.Series | None",
+    index_row: pd.Series | None,
     label: str,
     expectations: list[tuple[str, str, int]],
 ) -> list[str]:
-    """Cross-check index.csv count columns against the loaded h5ad.
+    """Warnings where an ``index.csv`` count differs from the data.
 
-    ``expectations`` is a list of ``(index.csv column, human label, actual value)``.
-    Missing / non-integer cells are ignored - the index is hand-maintained.
+    ``expectations``: ``(index.csv column, what, actual value)``. Empty or
+    non-integer index cells are skipped.
     """
     if index_row is None:
         return []
@@ -139,3 +105,49 @@ def check_index_counts(
                 f"{label}: index.csv {idx_col}={val} != actual {what}={actual}"
             )
     return warns
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+def load_X(adata: ad.AnnData) -> np.ndarray:
+    """``adata.X`` as a dense array."""
+    X = adata.X
+    if issparse(X):
+        return X.toarray()
+    return np.asarray(X)
+
+
+def is_intable(x) -> bool:
+    """Whether ``x`` is an integer or a string holding one."""
+    try:
+        if isinstance(x, (int, np.integer)):
+            return True
+        if isinstance(x, str):
+            int(x)
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def to_int_safe(x) -> int:
+    """``int(x)``; raises ``ValueError`` unless :func:`is_intable`."""
+    if is_intable(x):
+        return int(x)
+    raise ValueError("not intable")
+
+
+def status_of(errors: list[str], warns: list[str]) -> str:
+    """``"ERROR"``, ``"WARN"`` or ``"OK"``."""
+    if errors:
+        return "ERROR"
+    return "WARN" if warns else "OK"
+
+
+def colored(text: str, status: str) -> str:
+    """``text`` in the terminal colour of ``status``."""
+    codes = {"OK": "\033[92m", "WARN": "\033[93m", "ERROR": "\033[91m"}
+    reset = "\033[0m"
+    code = codes.get(status, "")
+    return f"{code}{text}{reset}"

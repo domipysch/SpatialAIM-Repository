@@ -1,5 +1,7 @@
-"""SpatialAIM (Annotation Independent Mapping): over-cluster an scRNA reference, agglomerate
-the subclusters into K states, and map ST spots onto those states across a K sweep.
+"""
+SpatialAIM (Annotation Independent Mapping): split an scRNA reference into start
+clusters, agglomerate them into K states, and map ST spots onto those states across a
+K sweep.
 Public surface: ``SpatialAIMConfig``, ``MAPPING_CHOICES``, ``run``, ``SpotStateMapper``.
 
 These names are exposed lazily (PEP 562) so that importing ``spatialaim``, or a

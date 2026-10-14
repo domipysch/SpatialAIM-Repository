@@ -1,4 +1,5 @@
-"""Interactive Streamlit GUI for browsing SpatialAIM run results.
+"""
+Interactive Streamlit GUI for browsing SpatialAIM run results.
 
 Launched via ``spatialaim gui`` (see ``gui/__main__.py``), which starts a Streamlit
 server running ``gui/app.py``. The GUI drives SpatialAIM in-process (one run

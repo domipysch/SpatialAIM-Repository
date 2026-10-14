@@ -1,4 +1,5 @@
-"""Custom Streamlit widgets for the GUI.
+"""
+Custom Streamlit widgets for the GUI.
 
 ``live_slider`` / ``live_select_slider`` are drop-in replacements for
 ``st.slider`` / ``st.select_slider`` that emit their value **continuously while

@@ -1,4 +1,5 @@
-"""Load (or build) the reference AnnData "scaffold" the UMAP / profile /
+"""
+Load (or build) the reference AnnData "scaffold" the UMAP / profile /
 merge-map plots need.
 
 The scaffold is the reference with lognorm layers, start clusters, the shared-gene

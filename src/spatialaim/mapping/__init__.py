@@ -1,5 +1,6 @@
-"""Spot->state mapping: the ``SpotStateMapper`` API and its ``NearestCentroidMapper``,
-``WANNMapper``, and ``ReferenceMapper`` implementations."""
+"""
+Spot->state mappers: the ``SpotStateMapper`` interface and its implementations.
+"""
 
 from .base import SpotStateMapper
 from .nearest_centroid import NearestCentroidMapper

@@ -1,4 +1,5 @@
-"""Drive an SpatialAIM sweep for one mapper from the GUI.
+"""
+Drive an SpatialAIM sweep for one mapper from the GUI.
 
 Runs ``spatialaim.run`` in-process (the same call ``spatialaim run`` makes). The sweep only
 writes machine-readable metrics per K -- no figures -- and the GUI renders every
@@ -41,8 +42,12 @@ class MapperRun:
         k_step: int,
         linkage_method: str = LINKAGE_METHODS[0],
         start_from_annotation: str | None = None,
+        segmentation_path: Path | None = None,
     ) -> None:
         self.mapper = mapper
+        self.segmentation_path = (
+            Path(segmentation_path) if segmentation_path is not None else None
+        )
         self.sc_path = Path(sc_path)
         self.st_path = Path(st_path)
         self.output_dir = Path(output_dir)
@@ -55,7 +60,7 @@ class MapperRun:
         self.error: str | None = None
         self._thread = threading.Thread(target=self._run, daemon=True)
 
-    def start(self) -> "MapperRun":
+    def start(self) -> MapperRun:
         self._thread.start()
         return self
 
@@ -78,6 +83,7 @@ class MapperRun:
                 self.st_path,
                 self.output_dir,
                 cfg,
+                self.segmentation_path,
             )
         except Exception:  # noqa: BLE001 - surface any failure to the UI
             self.error = traceback.format_exc()

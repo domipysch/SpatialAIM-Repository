@@ -1,4 +1,5 @@
-"""Pure on-disk readers for SpatialAIM sweep outputs.
+"""
+Pure on-disk readers for SpatialAIM sweep outputs.
 
 Everything here is cheap and side-effect-free (reads only); the Streamlit app
 wraps the expensive ones with ``st.cache_data``. A "run root" is the folder a
@@ -19,6 +20,7 @@ import pandas as pd
 
 # MAPPING_CHOICES is the authoritative list of valid mapper names.
 from spatialaim import MAPPING_CHOICES
+from spatialaim.analysis.shape_consistency import SHAPE_FEATURES_CSV
 from spatialaim.io import START_CLUSTERING_FILENAME
 
 _K_DIR_RE = re.compile(r"^k_(\d{3})$")
@@ -102,6 +104,16 @@ def load_coherence_per_spot(root: Path, k: int) -> np.ndarray:
     return df["same_label_share"].to_numpy(dtype=np.float64)
 
 
+def load_shape_features(root: Path) -> pd.DataFrame | None:
+    """Per-cell shape features of the ST slice (``cell_shape_features.csv`` at the run
+    root, in spot order: ``area_px``, ``area_um2``, ``eccentricity``,
+    ``solidity``), or ``None`` when the sweep ran without a segmentation mask."""
+    path = Path(root) / SHAPE_FEATURES_CSV
+    if not path.exists():
+        return None
+    return pd.read_csv(path, index_col=0)
+
+
 def load_cossim_distributions(root: Path, k: int) -> dict[str, dict[str, list]]:
     """Per-combo reconstruction cosine-similarity value lists for one K.
 
@@ -124,71 +136,10 @@ def load_cossim_distributions(root: Path, k: int) -> dict[str, dict[str, list]]:
     return out
 
 
-def ksweep_csv(root: Path) -> pd.DataFrame | None:
+def ksweep_table(root: Path) -> pd.DataFrame | None:
+    """The run root's ``k_comparison.csv``, or ``None`` if it does not exist."""
     path = Path(root) / "k_comparison.csv"
     return pd.read_csv(path) if path.exists() else None
-
-
-# Columns the sweep CSV gained after some runs were already computed. When a
-# k_comparison.csv predates them they are recovered from each K's analysis outputs
-# (same values, just not yet collected into the table), so an older run root still
-# shows every curve without re-running the sweep. Nothing is computed here. The
-# modularities carry no null — a shuffled modularity is meaningless, so the sweep
-# never measures one and the coherence criterion simply has no crosshair.
-_MODULARITY_COLUMNS = ("modularity_st_expression",)
-# csv column -> cossim_summary.csv column, both on the "hard-raw" row
-_COSSIM_NULL_COLUMNS = {
-    "cossim_hard_raw_spot_null": "median_spot_null",
-    "cossim_hard_raw_gene_null": "median_gene_null",
-}
-
-
-def _as_float(value) -> float:
-    return float(value) if isinstance(value, (int, float)) else float("nan")
-
-
-def _cossim_summary_row(root: Path, k: int, row: str) -> dict:
-    """One row of a K's ``cossim_summary.csv`` as a plain dict (empty if absent)."""
-    path = data_dir(root, k) / "cossim_summary.csv"
-    if not path.exists():
-        return {}
-    try:
-        table = pd.read_csv(path, index_col=0)
-    except (OSError, pd.errors.ParserError):
-        return {}
-    if row not in table.index:
-        return {}
-    return table.loc[row].to_dict()
-
-
-def ksweep_table(root: Path) -> pd.DataFrame | None:
-    """``k_comparison.csv``, back-filled for run roots written by an older sweep.
-
-    The sweep collects every metric the GUI plots — including the label-shuffle
-    nulls measured by the post-mapping analysis — so this is a plain read; only
-    columns absent from the CSV are looked up in the per-K analysis outputs.
-    Returns ``None`` if the CSV is absent.
-    """
-    df = ksweep_csv(root)
-    if df is None or "k" not in df.columns:
-        return df
-    df = df.copy()
-    ks = df["k"].astype(int).tolist()
-
-    missing = [c for c in _MODULARITY_COLUMNS if c not in df.columns]
-    if missing:
-        per_k = [load_data_json(root, k, "modularity_metrics.json") or {} for k in ks]
-        for column in missing:
-            df[column] = [_as_float(m.get(column)) for m in per_k]
-
-    missing = [c for c in _COSSIM_NULL_COLUMNS if c not in df.columns]
-    if missing:
-        per_k = [_cossim_summary_row(root, k, "hard-raw") for k in ks]
-        for column in missing:
-            source = _COSSIM_NULL_COLUMNS[column]
-            df[column] = [_as_float(row.get(source)) for row in per_k]
-
-    return df
 
 
 def list_obs_columns(sc_path: Path) -> list[str]:
@@ -228,43 +179,27 @@ def load_spatial_lognorm(st_path: Path, genes: list[str]):
 
 
 def start_clustering_path(root: Path) -> Path | None:
-    """The run root's start-clustering h5ad, or ``None`` if it has neither the
-    current file nor the pre-rename ``leiden_overclustering.h5ad``."""
-    root = Path(root)
-    for name in (START_CLUSTERING_FILENAME, "leiden_overclustering.h5ad"):
-        path = root / name
-        if path.exists():
-            return path
-    return None
+    """The run root's ``start_clustering.h5ad``, or ``None`` if it does not exist."""
+    path = Path(root) / START_CLUSTERING_FILENAME
+    return path if path.exists() else None
 
 
 def load_start_cluster_labels(root: Path) -> np.ndarray | None:
-    """Per-cell integer start-cluster labels from start_clustering.h5ad at the run
-    root, matching the ``start_cluster`` index in ``start_cluster_to_state.csv``.
-
-    An older run root stores them as the category strings ``leiden_<i>`` in a
-    ``leiden_cluster`` column; that layout is parsed back to ``i`` so existing
-    results keep loading.
-    """
+    """Each reference cell's start cluster (the index used in
+    ``start_cluster_to_state.csv``), or ``None`` without ``start_clustering.h5ad``."""
     path = start_clustering_path(root)
     if path is None:
         return None
-    obs = ad.read_h5ad(path).obs
-    if "start_cluster" in obs:
-        return obs["start_cluster"].to_numpy(dtype=int)
-    names = obs["leiden_cluster"].astype(str).to_numpy()
-    return np.array([int(n.split("_")[1]) for n in names], dtype=int)
+    return ad.read_h5ad(path).obs["start_cluster"].to_numpy(dtype=int)
 
 
 def load_start_cluster_names(root: Path) -> list[str] | None:
-    """Display name per start cluster (index-aligned), or ``None`` when the run root
-    predates them -- an older ``leiden_overclustering.h5ad`` carries no names."""
+    """The name of every start cluster (by index), or ``None`` without
+    ``start_clustering.h5ad``."""
     path = start_clustering_path(root)
     if path is None:
         return None
     obs = ad.read_h5ad(path).obs
-    if "start_cluster" not in obs or "start_cluster_name" not in obs:
-        return None
     labels = obs["start_cluster"].to_numpy(dtype=int)
     names = obs["start_cluster_name"].astype(str).to_numpy()
     out = [""] * (int(labels.max()) + 1)

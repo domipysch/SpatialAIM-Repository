@@ -1,8 +1,5 @@
-"""Validate an scRNA x ST pair: the shared-gene intersection SpatialAIM maps through.
-
-Both AnnData objects must already have passed :func:`validate_sc` /
-:func:`validate_st`. When a ``pairs.csv`` row is supplied, its
-``NumberSharedGenes`` cell is cross-checked too.
+"""
+Validate an scRNA x ST pair: their shared genes.
 """
 
 from __future__ import annotations
@@ -17,12 +14,14 @@ __all__ = ["validate_pair"]
 
 
 def validate_pair(
-    adata_sc: "ad.AnnData",
-    adata_st: "ad.AnnData",
-    index_row: "pd.Series | None" = None,
+    adata_sc: ad.AnnData,
+    adata_st: ad.AnnData,
+    index_row: pd.Series | None = None,
     label: str = "pair",
 ) -> tuple[list[str], list[str]]:
-    """Return ``(errors, warns)`` for the pair as such (not for either dataset)."""
+    """``(errors, warns)`` for the pair: too few shared genes, ST spots that
+    are empty on the shared genes, and a wrong ``NumberSharedGenes`` in the
+    ``pairs.csv`` row (if given)."""
     errors: list[str] = []
     warns: list[str] = []
 

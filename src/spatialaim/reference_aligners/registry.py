@@ -1,4 +1,5 @@
-"""Registry of the external reference aligners and the runner that executes them.
+"""
+Registry of the external reference aligners and the runner that executes them.
 
 Adding a reference aligner is two steps:
 

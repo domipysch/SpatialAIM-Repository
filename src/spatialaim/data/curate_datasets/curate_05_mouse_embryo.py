@@ -440,7 +440,7 @@ def _slice(
     return adata
 
 
-def _outline(meta: pd.DataFrame, cell: str) -> "list[np.ndarray] | None":
+def _outline(meta: pd.DataFrame, cell: str) -> list[np.ndarray] | None:
     x = np.asarray(meta.at[cell, VERTICES_X], dtype=np.float64)
     y = np.asarray(meta.at[cell, VERTICES_Y], dtype=np.float64)
     return [np.column_stack([x, y])] if len(x) >= 3 else None

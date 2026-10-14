@@ -1,4 +1,5 @@
-"""Streamlit UI for browsing SpatialAIM results.
+"""
+Streamlit UI for browsing SpatialAIM results.
 
 Launched by ``gui/__main__.py`` via ``streamlit run gui/app.py -- <args>``. Not
 meant to be run directly. Reads the up-front CLI args (sc/ST/output/K-range),
@@ -12,12 +13,14 @@ from __future__ import annotations
 
 import argparse
 import time
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
 import numpy as np
 import pandas as pd
 import streamlit as st
+from packaging.version import InvalidVersion, Version
 
 from spatialaim import LINKAGE_METHODS, MAPPING_CHOICES
 from spatialaim.adata_schema import OBSM_UMAP_SHARED_GENES
@@ -31,7 +34,7 @@ from spatialaim.gui import (
     state_names,
     widgets,
 )
-from spatialaim.metrics import kselection as scores
+from spatialaim.analysis import compare_ks as scores
 
 if TYPE_CHECKING:
     from anndata import AnnData
@@ -84,6 +87,19 @@ def _load_soft(root_str: str, k: int):
 
 
 @st.cache_data(show_spinner=False)
+def _cached_shape_features(root_str: str, _mtime: float) -> pd.DataFrame | None:
+    return data_access.load_shape_features(Path(root_str))
+
+
+def _shape_features(root: Path) -> pd.DataFrame | None:
+    """Per-cell shape features of a run root; ``None`` without a segmentation.
+    Keyed on the file's mtime too, so a sweep rerun in the same session shows."""
+    path = root / "cell_shape_features.csv"
+    mtime = path.stat().st_mtime if path.exists() else -1.0
+    return _cached_shape_features(str(root), mtime)
+
+
+@st.cache_data(show_spinner=False)
 def _coords(st_path_str: str):
     return data_access.load_spatial_coords(Path(st_path_str))
 
@@ -123,7 +139,7 @@ def _obs_columns(sc_path_str: str) -> list[str]:
 
 def _load_scaffold(
     args: argparse.Namespace, *, warn: str | None = None
-) -> "AnnData | None":
+) -> AnnData | None:
     """Return the cached reference scaffold, or ``None`` if it fails to build.
 
     On failure, surface ``warn`` (with the exception appended) as an
@@ -237,11 +253,13 @@ class _Card(NamedTuple):
     # Distinguishes the ``?`` buttons of two cards that share a title (a mapper
     # tab and the Compare tab render the same grid function).
     key: str = ""
+    # A wide card takes a whole row of the grid instead of half of one.
+    wide: bool = False
 
 
 @st.dialog("Set cell type names", width="large")
 def _state_names_dialog(
-    adata_sc: "AnnData", ref_root: Path, output_dir: Path, k: int
+    adata_sc: AnnData, ref_root: Path, output_dir: Path, k: int
 ) -> None:
     """Name this K's computed cell types, next to the UMAP that shows them.
 
@@ -313,12 +331,12 @@ _CTDLG_REOPEN = "_ctdlg_reopen"
 
 
 def _cell_type_dialog(
-    adata_sc: "AnnData",
+    adata_sc: AnnData,
     root: Path,
     k: int,
     state: int,
     output_dir: Path,
-    spatial: "render.SpatialContext | None" = None,
+    spatial: render.SpatialContext | None = None,
     *,
     origin: str,
 ) -> None:
@@ -358,21 +376,22 @@ _CTDLG_VIEWS = {
 
 
 def _cell_type_dialog_body(
-    adata_sc: "AnnData",
+    adata_sc: AnnData,
     root: Path,
     k: int,
     state: int,
     output_dir: Path,
-    spatial: "render.SpatialContext | None",
+    spatial: render.SpatialContext | None,
     origin: str,
 ) -> None:
     """The cell-type modal (right click on a cell type in a headline / reference
-    plot). A header row: a name field for the type (the same names the "Set cell
-    type names" dialog edits) beside the type highlighted on the all-gene
-    reference UMAP (and, in a mapper tab, the spatial map). Below, a bar of
-    views -- "General" (selected on opening, ``_cell_type_general_view``) and
-    "Gene expression", which lists the type's marker genes beneath it
-    (``_cell_type_gene_list``) -- beside the selected view."""
+    plot). A header row of two cards: a name field for the type (the same names
+    the "Set cell type names" dialog edits) beside the type highlighted on the
+    all-gene reference UMAP (and, in a mapper tab, the spatial map). Below, a
+    switch of views -- "General" (selected on opening,
+    ``_cell_type_general_view``), "Gene expression", whose marker-gene list
+    (``_cell_type_gene_list``) sits in a card left of its plots, and, with a
+    segmentation, "Shape features" -- each drawn as cards over the full width."""
     # "large" is too narrow for two UMAPs beside the gene list; widen only this
     # dialog (matched through the keyed container inside it).
     st.html(
@@ -383,13 +402,18 @@ def _cell_type_dialog_body(
         ".st-key-ctdlg_genes button,.st-key-ctdlg_genes a"
         "{min-height:1.9rem;padding-top:0.1rem;padding-bottom:0.1rem}"
         "div[class*='st-key-ctdlg_gc_']{padding:0 0.4rem}"
-        # A slim divider between the header row and the views.
-        ".st-key-ctdlg_root hr{margin:0.25rem 0 0.75rem}</style>"
+        # Breathing room above and below the view switch.
+        ".st-key-ctdlg_switch{margin:0.5rem 0 0.25rem}</style>"
     )
     # View and gene are per mapper too: the spatial lists depend on the mapping.
     view_key = f"ctdlg_view_{root.name}_{k}_{state}"
     gene_key = f"ctdlg_gene_{root.name}_{k}_{state}"
-    if st.session_state.get(view_key) not in _CTDLG_VIEWS:
+    # The shape view only exists for a mapping whose sweep had a segmentation.
+    shape = _shape_features(root) if spatial is not None else None
+    views = dict(_CTDLG_VIEWS)
+    if shape is not None:
+        views["shape"] = ("Shape features", ":material/pentagon:")
+    if st.session_state.get(view_key) not in views:
         st.session_state[view_key] = "general"
     view = st.session_state[view_key]
 
@@ -399,8 +423,10 @@ def _cell_type_dialog_body(
             st.session_state[gene_key] = g
 
     with st.container(key="ctdlg_root"):
-        head_left, head_right = st.columns([1, 4], gap="medium")
-        with head_left:
+        head_left, head_right = st.columns(
+            [1, 4], gap="medium", vertical_alignment="center"
+        )
+        with head_left, st.container(border=True):
             # A form, so Enter and the button both save in one step (a plain
             # input only commits its value on Enter, before any save).
             current = state_names.load(output_dir, k).get(int(state), "")
@@ -420,7 +446,7 @@ def _cell_type_dialog_body(
                 state_names.set_name(output_dir, k, state, new_name)
                 st.session_state[_CTDLG_REOPEN] = (origin, k, int(state))
                 st.rerun()
-        with head_right:
+        with head_right, st.container(border=True):
             st.plotly_chart(
                 render.render_cell_type_maps_figure(
                     adata_sc, root, k, state, spatial=spatial
@@ -429,50 +455,62 @@ def _cell_type_dialog_body(
                 key="ctdlg_types",
             )
 
-        st.divider()
-        nav, body = st.columns([1, 4], gap="medium")
-        with nav:
-            for v, (lab, icon) in _CTDLG_VIEWS.items():
-                st.button(
-                    lab,
-                    icon=icon,
-                    key=f"ctdlg_nav_{v}_{k}_{state}",
-                    type="primary" if v == view else "tertiary",
-                    width="stretch",
-                    on_click=_show,
-                    args=(v,),
-                )
-            gene = (
-                _cell_type_gene_list(adata_sc, root, k, state, spatial, gene_key, _show)
-                if view == "genes"
-                else None
+        # The view switch is keyed on ``view_key`` itself; deselecting the
+        # current view leaves None, which the check above turns into "general".
+        with st.container(key="ctdlg_switch"):
+            st.segmented_control(
+                "View",
+                list(views),
+                format_func=lambda v: f"{views[v][1]} {views[v][0]}",
+                key=view_key,
+                label_visibility="collapsed",
+                width="stretch",
             )
-        with body:
-            if view == "general":
-                _cell_type_general_view(adata_sc, root, k, state, spatial)
-            elif gene:
-                st.plotly_chart(
-                    render.render_gene_maps_figure(
-                        adata_sc, root, k, gene, spatial=spatial
-                    ),
-                    width="stretch",
-                    key="ctdlg_expr",
+        if view == "general":
+            _cell_type_general_view(adata_sc, root, k, state, spatial)
+        elif view == "shape" and shape is not None and spatial is not None:
+            _cell_type_shape_view(root, k, state, spatial, shape)
+        else:
+            nav, body = st.columns([1, 4], gap="medium")
+            with nav, st.container(border=True):
+                gene = _cell_type_gene_list(
+                    adata_sc, root, k, state, spatial, gene_key, _show
                 )
-                st.plotly_chart(
-                    render.render_gene_distribution_figure(
-                        adata_sc, root, k, state, gene, spatial=spatial
-                    ),
-                    width="stretch",
-                    key="ctdlg_violin",
-                )
+            with body:
+                if gene:
+                    with st.container(border=True):
+                        st.plotly_chart(
+                            render.render_gene_maps_figure(
+                                adata_sc, root, k, gene, spatial=spatial
+                            ),
+                            width="stretch",
+                            key="ctdlg_expr",
+                        )
+                    with st.container(border=True):
+                        st.plotly_chart(
+                            render.render_gene_distribution_figure(
+                                adata_sc, root, k, state, gene, spatial=spatial
+                            ),
+                            width="stretch",
+                            key="ctdlg_violin",
+                        )
+
+
+def _modal_card(title: str, help: str | None = None):
+    """A bordered card of the cell-type modal with a bold title (and its ``?``
+    tooltip): the modal's counterpart of the report's ``_render_card_grid``
+    cards, whose ``?`` opens a dialog -- which a dialog cannot nest."""
+    card = st.container(border=True)
+    card.markdown(f"**{title}**", help=help)
+    return card
 
 
 def _cell_type_gene_list(
-    adata_sc: "AnnData",
+    adata_sc: AnnData,
     root: Path,
     k: int,
     state: int,
-    spatial: "render.SpatialContext | None",
+    spatial: render.SpatialContext | None,
     gene_key: str,
     show: Callable[..., None],
 ) -> str | None:
@@ -492,6 +530,7 @@ def _cell_type_gene_list(
         key: (lab if spatial is None or from_st else lab + " · scRNA")
         for key, (lab, from_st, _d) in _MARKER_LISTS.items()
     }
+    st.markdown("**Marker genes**")
     choice = st.selectbox(
         "Marker genes",
         options,
@@ -541,11 +580,11 @@ def _cell_type_gene_list(
 
 
 def _cell_type_general_view(
-    adata_sc: "AnnData",
+    adata_sc: AnnData,
     root: Path,
     k: int,
     state: int,
-    spatial: "render.SpatialContext | None",
+    spatial: render.SpatialContext | None,
 ) -> None:
     """The cell-type modal's "General" view. A per-type bar plot beside a
     this-type-vs-all-spots violin in each row, every other type greyed out in the
@@ -561,45 +600,77 @@ def _cell_type_general_view(
         highlight=state,
     )
     if spatial is None:
-        st.markdown("**Cell type fractions**")
-        st.plotly_chart(fractions, width="stretch", key="ctdlg_frac")
+        with _modal_card("Cell type fractions"):
+            st.plotly_chart(fractions, width="stretch", key="ctdlg_frac")
         return
 
-    frac_col, conf_col = st.columns([3, 2])
-    with frac_col:
-        st.markdown("**Cell type fractions**")
+    frac_col, conf_col = st.columns([3, 2], gap="medium")
+    with frac_col, _modal_card("Cell type fractions"):
         st.plotly_chart(fractions, width="stretch", key="ctdlg_frac")
-    with conf_col:
-        st.markdown(f"**Mapping {spatial.confidence_title.lower()}**")
+    with conf_col, _modal_card(f"Mapping {spatial.confidence_title.lower()}"):
         st.plotly_chart(
             render.render_state_confidence_figure(root, k, state, spatial),
             width="stretch",
             key="ctdlg_conf",
         )
-    z_col, coh_col = st.columns([3, 2])
-    with z_col:
-        st.markdown(
-            "**Spatial organization**",
+    z_col, coh_col = st.columns([3, 2], gap="medium")
+    with (
+        z_col,
+        _modal_card(
+            "Spatial organization",
             help="Self neighbourhood enrichment per cell type: how much more "
             "often its cells border each other (6 nearest cells) than under a "
             "label shuffle, as a z-score.",
-        )
+        ),
+    ):
         st.plotly_chart(
             render.render_self_enrichment_figure(root, k, highlight=state),
             width="stretch",
             key="ctdlg_selfz",
         )
-    with coh_col:
-        st.markdown(
-            "**Transcriptional coherence**",
+    with (
+        coh_col,
+        _modal_card(
+            "Transcriptional coherence",
             help="Per spatial cell: the share of its 15 most similar cells by ST "
             "expression that were mapped to its own cell type. Chance: the "
             "type's share of spatial cells.",
-        )
+        ),
+    ):
         st.plotly_chart(
             render.render_state_coherence_figure(root, k, state, spatial),
             width="stretch",
             key="ctdlg_coherence",
+        )
+
+
+def _cell_type_shape_view(
+    root: Path,
+    k: int,
+    state: int,
+    spatial: render.SpatialContext,
+    features: pd.DataFrame,
+) -> None:
+    """The cell-type modal's "Shape features" view: area, eccentricity and
+    solidity of the type's cells vs. all cells, under the mapping's shape
+    consistency."""
+    metrics = (
+        data_access.load_data_json(root, k, "shape_consistency_metrics.json") or {}
+    )
+    score = metrics.get("shape_consistency", float("nan"))
+    with _modal_card(
+        "Shape features",
+        help="The area, eccentricity and solidity of this cell type's spatial "
+        "cells in the segmentation mask, beside those of all cells. Shape "
+        "consistency (of the whole mapping): 1 − mean within-type shape "
+        "variance / variance of all cells.",
+    ):
+        if score == score:
+            st.caption(f"Shape consistency of this mapping: {score:.3f}")
+        st.plotly_chart(
+            render.render_state_shape_figure(root, k, state, spatial.hard, features),
+            width="stretch",
+            key="ctdlg_shape",
         )
 
 
@@ -628,11 +699,17 @@ def _render_card_grid(cards: list[_Card]) -> None:
     share of the width whatever it holds, so the ``?`` ended up left-aligned
     inside its own column with dead space to its right. ``distribute`` pushes the
     first and last element to the two edges instead, so the icon sits flush in
-    the card's top-right corner.
+    the card's top-right corner. A ``wide`` card gets a row of its own.
     """
-    for start in range(0, len(cards), 2):
-        cols = st.columns(2)
-        for col, card in zip(cols, cards[start : start + 2]):
+    rows: list[list[_Card]] = []
+    for card in cards:
+        if card.wide or not rows or len(rows[-1]) == 2 or rows[-1][0].wide:
+            rows.append([card])
+        else:
+            rows[-1].append(card)
+    for row in rows:
+        cols = [st.container()] if row[0].wide else st.columns(2)
+        for col, card in zip(cols, row):
             with col, st.container(border=True):
                 hdr = st.container(
                     horizontal=True,
@@ -808,7 +885,7 @@ def _headline(
         st.caption("ST data has no obsm['spatial'] — no spatial plot.")
 
 
-def _render_progress(mapper: str, run: "compute.MapperRun") -> None:
+def _render_progress(mapper: str, run: compute.MapperRun) -> None:
     """Progress bar for a mapper currently being computed."""
     done, expected = run.n_done(), run.n_expected()
     if expected:
@@ -942,7 +1019,7 @@ def _best_k_rows(score_table: pd.DataFrame) -> list[tuple[str, int, float, str]]
     """``(description, k, score, slug)`` for the best overall K and the best K per
     criterion.
 
-    Presentation wrapper around :func:`spatialaim.metrics.kselection.best_ks`, which the
+    Presentation wrapper around :func:`spatialaim.analysis.compare_ks.best_ks`, which the
     sweep also writes to ``k_selection.json`` — the card and the file therefore
     always agree. A criterion with no finite score anywhere is skipped rather than
     reported as a winner.
@@ -1149,11 +1226,10 @@ def _topology_groups(metrics: dict) -> dict[str, dict]:
     """The nested metric groups of ``topology_metrics.json``, shaped for display.
 
     Drops any top-level scalar and, for a known group,
-    keeps only the fields in ``_TOPOLOGY_FIELDS`` in that order. Fields absent
-    from the JSON are skipped, so a run written before a field existed still
-    renders. ``nhood_enrichment`` is null when there are too few mapped states;
-    that is not a dict, so it drops out here as it always did. ``per_state``
-    feeds the cell-type modal, not this card.
+    keeps only the fields in ``_TOPOLOGY_FIELDS`` in that order (skipping
+    absent ones). ``nhood_enrichment`` is null when there are too few mapped
+    states and then drops out. ``per_state`` feeds the cell-type modal, not
+    this card.
     """
     out: dict[str, dict] = {}
     for group, vals in metrics.items():
@@ -1208,6 +1284,23 @@ neighbours. Then compute:
 
 For both z-scores, 0 means the mapping is spatially no better arranged than
 random relabelling; clearly positive means it forms spatial domains.
+"""
+
+_HELP_SHAPE = """
+For every segmented spatial cell in the mask, we compute:
+
+- **Area**: the cell's size (µm² when the mask's pixel size is known, else pixels;
+  log scale).
+- **Eccentricity**: how elongated it is — 0 for a circle, towards 1 for a line.
+- **Solidity**: area / area of its convex hull — 1 for a convex cell, lower for a
+  dented or lobed outline, eg. a star-shape.
+
+**Shape consistency** sums this up for the mapping: the three features are
+z-scored over all segmented cells, each cell type's shape variance is
+computed and averaged over the cell types (each type with at least two cells counts
+equally), and the score is 1 − that mean variance / the variance of all cells.
+1 = all cells of each type share one shape, 0 = the types are as varied as the
+whole tissue (chance level).
 """
 
 
@@ -1329,6 +1422,38 @@ def _report_dashboard(
             key=f"topo_{mapper}",
         )
     )
+
+    # Only for a sweep run with a segmentation mask (it wrote cell_shape_features.csv).
+    features = _shape_features(root)
+    if features is not None:
+
+        def _shape() -> None:
+            metrics = (
+                data_access.load_data_json(root, k, "shape_consistency_metrics.json")
+                or {}
+            )
+            score = metrics.get("shape_consistency", float("nan"))
+            st.markdown(
+                f"Shape consistency: **{score:.3f}** "
+                f"({metrics.get('n_cells_used', 0):,} segmented cells)"
+                if score == score
+                else "Shape consistency: not available for this K"
+            )
+            _plot_card(
+                render.render_shape_features_figure(root, k, hard, features),
+                key=f"card_shape_{mapper}",
+                stem=f"{mapper}_k{k:03d}_shape_features",
+            )
+
+        cards.append(
+            _Card(
+                "Shape features",
+                _shape,
+                help=_HELP_SHAPE,
+                key=f"shape_{mapper}",
+                wide=True,
+            )
+        )
 
     _render_card_grid(cards)
 
@@ -1593,6 +1718,11 @@ def _browse(kind: str, key: str) -> None:
         try:
             if kind == "dir":
                 chosen = filedialog.askdirectory(title="Select output directory")
+            elif kind == "tif":
+                chosen = filedialog.askopenfilename(
+                    title="Select segmentation mask",
+                    filetypes=[("TIFF", "*.tif *.tiff"), ("All files", "*.*")],
+                )
             else:
                 chosen = filedialog.askopenfilename(
                     title="Select .h5ad file",
@@ -1619,6 +1749,7 @@ def _clear_session() -> None:
     """
     st.session_state["cfg_sc"] = ""
     st.session_state["cfg_st"] = ""
+    st.session_state["cfg_seg"] = ""
     st.session_state["cfg_out"] = ""
     st.session_state["cfg_linkage"] = LINKAGE_METHODS[0]
     st.session_state["cfg_start"] = _LEIDEN_START_LABEL
@@ -1647,8 +1778,8 @@ def _run_lock(out_str: str) -> dict | None:
     """The scaffold-defining settings an output folder's existing runs pin down, or
     ``None`` when it holds no runs yet.
 
-    Read back from any mapper's ``config.yaml``. A value the config does not record
-    (an older run root) comes back as ``None`` and stays editable.
+    Read back from any mapper's ``config.yaml``; a value it does not record
+    comes back as ``None`` and stays editable.
     """
     out_path = Path(out_str.strip()) if out_str.strip() else None
     if out_path is None or not data_access.list_mappers(out_path):
@@ -1747,15 +1878,22 @@ def _linkage_method_row(lock: dict | None) -> str:
 
 
 @st.cache_data(show_spinner="Validating dataset pair…")
-def _validate_pair(sc_path_str: str, st_path_str: str) -> "PairFindings":
-    """Findings for the selected sc/ST pair, from ``spatialaim.data.validate``.
+def _validate_pair(
+    sc_path_str: str, st_path_str: str, seg_path_str: str = ""
+) -> PairFindings:
+    """Findings for the selected sc/ST pair (and the ST slice's segmentation mask,
+    if one is given), from ``spatialaim.data.validate``.
 
-    Cached per path pair: the checks read both count matrices, so they run once
-    per selection rather than on every rerun.
+    Cached per path combination: the checks read both count matrices, so they run
+    once per selection rather than on every rerun.
     """
     from spatialaim.data.validate import check_pair
 
-    return check_pair(Path(sc_path_str), Path(st_path_str))
+    return check_pair(
+        Path(sc_path_str),
+        Path(st_path_str),
+        segmentation_path=Path(seg_path_str) if seg_path_str else None,
+    )
 
 
 def _subject_heading(key: str) -> str:
@@ -1767,7 +1905,7 @@ def _subject_heading(key: str) -> str:
 
 
 @st.dialog("Dataset validation", width="large")
-def _validation_dialog(findings: "PairFindings") -> None:
+def _validation_dialog(findings: PairFindings, with_segmentation: bool) -> None:
     """Modal listing what the validators found. Purely informative — closing it
     leaves the pair selected and the run configurable."""
     if findings.errors:
@@ -1790,8 +1928,10 @@ def _validation_dialog(findings: "PairFindings") -> None:
         for msg in subject.warns:
             st.warning(msg.removeprefix(f"{kind}: "), icon="⚠️")
 
+    seg_arg = " --segmentation <mask.tif>" if with_segmentation else ""
     st.caption(
-        "Same checks as `spatialaim validate --scdata <sc.h5ad> --stdata <st.h5ad>`."
+        "Same checks as "
+        f"`spatialaim validate --scdata <sc.h5ad> --stdata <st.h5ad>{seg_arg}`."
     )
     if st.button("Continue", type="primary", key="validation_close"):
         st.rerun()
@@ -1813,24 +1953,19 @@ def _data_requirements_dialog() -> None:
     check in ``spatialaim.data.validate`` changes.
     """
     st.markdown(
-        "SpatialAIM maps **scRNA-seq reference data** onto **high-resolution spatial transcriptomics data (e.g. MERFISH / Xenium / seqFISH / osmFISH)**. "
+        "SpatialAIM maps **scRNA-seq reference data** onto **imaging-based high-resolution spatial transcriptomics data** (e.g. MERFISH / Xenium / seqFISH / osmFISH). "
         "Both are expected as `.h5ad` (AnnData) files holding **raw counts**."
     )
 
+    st.markdown("**Required input**")
     st.markdown("""
 | | scRNA reference | ST slice |
 |---|---|---|
+| file type | `.h5ad` | `.h5ad` |
 | **`X`** | raw counts, cells × genes | raw counts, "cells" × genes |
 | **`var_names`** | gene symbols, **UPPERCASE** and unique | gene symbols, **UPPERCASE** and unique |
-| additional **`obs`** | annotation columns optional | - |
 | **`obsm["spatial"]`** | - | `(n_cells, 2)` x/y coordinates |
 """)
-
-    st.markdown(
-        "As a pair genes are matched **by name**, so both files must use the same "
-        "symbol convention — the uppercase rule is what makes the intersection "
-        "work.\n"
-    )
 
     st.markdown("**Annotations are optional**")
     st.markdown(
@@ -1838,28 +1973,60 @@ def _data_requirements_dialog() -> None:
         "column with cell types can still be chosen under *Override starting "
         "clusters* to build the tree over that annotation instead."
     )
+    st.markdown("""
+| | scRNA reference |
+|---|---|
+| **`obs["<YOUR-CELLTYPE-KEY>"]`** | cell type annotation columns |
+""")
 
-    if st.button("Got it", key="data_help_close"):
-        st.rerun()
+    st.markdown("**Segmentation mask is optional**")
+    st.markdown(
+        "A cell segmentation of the ST slice adds the **shape features** of the "
+        "spatial cells (area, eccentricity, solidity) and the **shape "
+        "consistency** of the mapping: how uniform the cell shapes within each "
+        "mapped cell type are."
+    )
+    st.markdown(
+        "Segmentation mask: 2D `.tif` / `.tiff`, dtype **`uint32`**. `0` = "
+        "background, cells labelled `1 … max` **without gaps**; labels without a "
+        "cell in the ST data are allowed."
+    )
+    st.markdown("""
+| | ST slice |
+|---|---|
+| **`obs["segmentation_id"]`** | integer, each cell's label in the mask, `0` = cell not segmented; non-zero ids unique and present in the mask |
+| **`uns["segmentation_pixel_size_um"]`** | optional: µm per mask pixel (cell areas are then shown in µm², else in pixels) |
+""")
 
 
-def _validation_row(sc_path: Path, st_path: Path, *, allow_dialog: bool = True) -> None:
-    """Validate the selected pair and report the verdict above the step-2 divider.
+def _validation_row(
+    sc_path: Path,
+    st_path: Path,
+    seg_path: Path | None = None,
+    *,
+    allow_dialog: bool = True,
+) -> None:
+    """Validate the selected pair (with the optional segmentation mask) and report
+    the verdict above the step-2 divider.
 
     Clean pairs get a one-line tick; anything else opens the modal once per pair
     (re-openable via *Details*). Findings never block: the user closes the modal
     and configures the run as before. ``allow_dialog=False`` keeps the status line
     but suppresses the modal for this rerun, when another dialog already owns it.
     """
-    key = f"{sc_path}||{st_path}"
+    seg_str = str(seg_path) if seg_path is not None else ""
+    key = f"{sc_path}||{st_path}||{seg_str}"
     try:
-        findings = _validate_pair(str(sc_path), str(st_path))
+        findings = _validate_pair(str(sc_path), str(st_path), seg_str)
     except Exception as exc:  # noqa: BLE001 - a failed check must not kill the app
         st.sidebar.caption(f"⚠️ Could not validate the dataset pair: {exc}")
         return
 
     if findings.ok:
-        st.sidebar.caption("✅ Dataset pair matches requirements")
+        what = (
+            "Dataset pair and segmentation" if seg_path is not None else "Dataset pair"
+        )
+        st.sidebar.caption(f"✅ {what} match requirements")
         return
 
     n_err, n_warn = len(findings.errors), len(findings.warns)
@@ -1879,7 +2046,7 @@ def _validation_row(sc_path: Path, st_path: Path, *, allow_dialog: bool = True) 
     wanted = st.session_state.pop("_validation_reopen", False) or seen != key
     if wanted and allow_dialog:
         st.session_state["_validation_seen"] = key
-        _validation_dialog(findings)
+        _validation_dialog(findings, seg_path is not None)
 
 
 def _sidebar() -> argparse.Namespace | None:
@@ -1954,6 +2121,7 @@ def _sidebar() -> argparse.Namespace | None:
         _data_requirements_dialog()
     st.session_state.setdefault("cfg_sc", "")
     st.session_state.setdefault("cfg_st", "")
+    st.session_state.setdefault("cfg_seg", "")
     st.session_state.setdefault("cfg_out", "")
     st.session_state.setdefault("cfg_linkage", LINKAGE_METHODS[0])
 
@@ -1974,6 +2142,7 @@ def _sidebar() -> argparse.Namespace | None:
 
     sc_str = _path_row("scRNA .h5ad path", "cfg_sc", "file", "browse_sc")
     st_str = _path_row("ST .h5ad path", "cfg_st", "file", "browse_st")
+    seg_str = _path_row("Segmentation path (optional)", "cfg_seg", "tif", "browse_seg")
     out_str = _path_row("Output directory", "cfg_out", "dir", "browse_out")
     if st.session_state.get("_browse_error"):
         st.sidebar.warning(st.session_state.pop("_browse_error"))
@@ -1981,6 +2150,10 @@ def _sidebar() -> argparse.Namespace | None:
     sc_path = Path(sc_str.strip()) if sc_str.strip() else None
     st_path = Path(st_str.strip()) if st_str.strip() else None
     out_path = Path(out_str.strip()) if out_str.strip() else None
+    # Optional: an empty field means no mask. A set path is validated with the
+    # pair (a missing file shows up there as an error) and only passed on to the
+    # runs when it points at a file.
+    seg_path = Path(seg_str.strip()) if seg_str.strip() else None
 
     incomplete = (
         sc_path is None
@@ -1993,7 +2166,7 @@ def _sidebar() -> argparse.Namespace | None:
     # Both paths point at real files: validate the pair before anything is
     # configured, so contract violations surface here and not deep in a sweep.
     if not incomplete:
-        _validation_row(sc_path, st_path, allow_dialog=not show_data_help)
+        _validation_row(sc_path, st_path, seg_path, allow_dialog=not show_data_help)
 
     # -- step 2: scaffold knobs + methods ---------------------------------
     # The header stays visible while step 1 is incomplete; its controls need the
@@ -2015,6 +2188,7 @@ def _sidebar() -> argparse.Namespace | None:
     settings = argparse.Namespace(
         scdata=sc_path,
         stdata=st_path,
+        segmentation=seg_path if seg_path is not None and seg_path.is_file() else None,
         output_dir=out_path,
         k_min=_DEFAULT_K_MIN,
         k_max=_DEFAULT_K_MAX,
@@ -2146,20 +2320,47 @@ def _sidebar_footer() -> None:
         # vertical block (the methods card, the header button row) as well.
         "div[data-testid='stSidebarUserContent']>div>div[data-testid='stVerticalBlock']"
         "{flex:1 0 auto;}"
-        "div[class*='st-key-feedback_btn']{margin-top:auto;}"
+        # Streamlit may wrap a keyed container in a layout div; push whichever
+        # one is the sidebar column's child.
+        "div[data-testid='stLayoutWrapper']:has(> div[class*='st-key-sidebar_footer']),"
+        "div[class*='st-key-sidebar_footer']{margin-top:auto;}"
         "div[class*='st-key-feedback_btn'] button{opacity:0.5;}"
         "div[class*='st-key-feedback_btn'] button:hover{opacity:1;}"
         "div[class*='st-key-feedback_btn'] button p{font-size:0.8rem;}"
         "</style>",
         unsafe_allow_html=True,
     )
-    if st.sidebar.button(
+    footer = st.sidebar.container(
+        horizontal=True, vertical_alignment="center", key="sidebar_footer"
+    )
+    full_version = _app_version()
+    footer.caption(
+        f"v{_release_version(full_version)}", help=f"spatial-aim {full_version}"
+    )
+    if footer.button(
         "Feedback",
         icon=":material/chat_bubble:",
         type="tertiary",
         key="feedback_btn",
     ):
         _feedback_dialog()
+
+
+def _app_version() -> str:
+    """The installed ``spatial-aim`` version (from the git tag)."""
+    try:
+        return version("spatial-aim")
+    except PackageNotFoundError:  # source tree without install
+        return "0.0.0"
+
+
+def _release_version(full: str) -> str:
+    """``X.Y.Z`` of a version, without dev / local parts
+    (``1.0.1.dev2+g05a8291`` -> ``1.0.1``)."""
+    try:
+        return Version(full).base_version
+    except InvalidVersion:
+        return full
 
 
 # --------------------------------------------------------------------------- #
@@ -2315,6 +2516,7 @@ def main() -> None:
             settings.k_step,
             linkage_method=settings.linkage_method,
             start_from_annotation=settings.start_from_annotation,
+            segmentation_path=settings.segmentation,
         ).start()
         running = True
         just_started = True

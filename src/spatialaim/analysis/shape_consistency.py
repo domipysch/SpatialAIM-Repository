@@ -1,33 +1,24 @@
-"""Shape consistency of the mapping: how uniform the cell shapes within each
-mapped state are, from the ST slice's optional cell segmentation mask.
-
-:func:`prepare_shape_features` runs once per sweep, right after the ST data is
-read: it measures the cells in the mask and caches their z-scored shape features
-in ``adata_st.obsm``. :func:`analyse_shape_consistency` runs per K and scores the
-hard spot->state labels on them (see :mod:`spatialaim.metrics.shape_consistency`).
-Without a mask the per-K file is still written, with NaN scores.
+"""
+Shape consistency of one K's mapping, from the ST slice's optional segmentation
+mask. The cells are measured once per sweep (:func:`prepare_shape_features`);
+each K is then scored on them (:func:`analyse_shape_consistency`).
 """
 
 from __future__ import annotations
-
 import json
 import logging
 from pathlib import Path
-
 import numpy as np
+import pandas as pd
 from anndata import AnnData
-from scipy import sparse
-
 from spatialaim.adata_schema import (
     OBS_MAPPING_HARD,
     OBS_SEGMENTATION_ID,
     OBSM_SHAPE_FEATURES,
-    OBSP_SHAPE_CONNECTIVITIES,
+    UNS_SEGMENTATION_PIXEL_SIZE,
 )
 from spatialaim.metrics.shape_consistency import (
     shape_features,
-    shape_knn_graph,
-    shape_modularity,
     state_variance_score,
     valid_cells,
     zscore,
@@ -36,14 +27,16 @@ from spatialaim.metrics.shape_consistency import (
 logger = logging.getLogger(__name__)
 
 SHAPE_CONSISTENCY_JSON = "shape_consistency_metrics.json"
+# Raw per-cell features at the run root, plotted by the GUI.
+SHAPE_FEATURES_CSV = "cell_shape_features.csv"
 
 
-def prepare_shape_features(adata_st: AnnData, segmentation_path: Path) -> None:
-    """Measure every segmented cell in the mask and cache the z-scored features.
+def prepare_shape_features(adata_st: AnnData, segmentation_path: Path) -> pd.DataFrame:
+    """Measure every cell in the mask (linked via ``obs["segmentation_id"]``)
+    and store the z-scored features in ``adata_st.obsm[OBSM_SHAPE_FEATURES]``.
 
-    Requires: adata_st.obs["segmentation_id"] (the cell's mask label, 0 = none).
-    Adds: adata_st.obsm[OBSM_SHAPE_FEATURES] (n_spots x 3, NaN rows for cells
-    without segmentation).
+    Returns the raw features per cell: ``area_px``, ``area_um2`` (NaN without a
+    pixel size), ``eccentricity``, ``solidity``; NaN for unsegmented cells.
     """
     import tifffile
 
@@ -60,32 +53,29 @@ def prepare_shape_features(adata_st: AnnData, segmentation_path: Path) -> None:
     logger.info(
         "  shape features for %d of %d cells", int(valid_cells(raw).sum()), len(raw)
     )
+    area_px = np.exp(raw[:, 0])
+    pixel_um = adata_st.uns.get(UNS_SEGMENTATION_PIXEL_SIZE)
+    return pd.DataFrame(
+        {
+            "area_px": area_px,
+            "area_um2": area_px * float(pixel_um) ** 2 if pixel_um else np.nan,
+            "eccentricity": raw[:, 1],
+            "solidity": raw[:, 2],
+        },
+        index=pd.Index(adata_st.obs_names, name="cell"),
+    )
 
 
-def _shape_connectivities(adata_st: AnnData, valid: np.ndarray):
-    """The shape kNN graph over the valid cells, built once and cached in obsp
-    (full n_spots x n_spots, no edges at cells without features)."""
-    if OBSP_SHAPE_CONNECTIVITIES not in adata_st.obsp:
-        sub = shape_knn_graph(adata_st.obsm[OBSM_SHAPE_FEATURES][valid])
-        index = np.flatnonzero(valid)
-        coo = sparse.coo_matrix(sub)
-        adata_st.obsp[OBSP_SHAPE_CONNECTIVITIES] = sparse.csr_matrix(
-            (coo.data, (index[coo.row], index[coo.col])),
-            shape=(adata_st.n_obs, adata_st.n_obs),
-        )
-    return adata_st.obsp[OBSP_SHAPE_CONNECTIVITIES][valid][:, valid]
+def write_shape_features(table: pd.DataFrame, run_root: Path) -> None:
+    """Write the table of :func:`prepare_shape_features` to the run root."""
+    table.to_csv(Path(run_root) / SHAPE_FEATURES_CSV)
 
 
 def analyse_shape_consistency(adata_st: AnnData, output_data_dir: Path) -> None:
-    """Both shape-consistency variants for this K's hard mapping.
-
-    Requires: adata_st.obs[OBS_MAPPING_HARD]; adata_st.obsm[OBSM_SHAPE_FEATURES]
-        if the slice has a segmentation mask.
-    Writes shape_consistency_metrics.json under output_data_dir.
-    """
+    """Write ``shape_consistency_metrics.json``: the shape consistency of the
+    spots' states and how many cells it used. NaN without a mask."""
     result = {
-        "shape_consistency_variance": float("nan"),
-        "shape_consistency_modularity": float("nan"),
+        "shape_consistency": float("nan"),
         "n_cells_used": 0,
         "n_cells_total": int(adata_st.n_obs),
     }
@@ -93,15 +83,10 @@ def analyse_shape_consistency(adata_st: AnnData, output_data_dir: Path) -> None:
         adata_st.obsm.get(OBSM_SHAPE_FEATURES, np.empty((adata_st.n_obs, 0)))
     )
     valid = valid_cells(features) & (features.shape[1] > 0)
-    if valid.sum() > 2:  # a kNN graph needs a few cells
+    if valid.sum() >= 2:
         labels = adata_st.obs[OBS_MAPPING_HARD].astype(int).to_numpy()[valid]
         result["n_cells_used"] = int(valid.sum())
-        result["shape_consistency_variance"] = state_variance_score(
-            features[valid], labels
-        )
-        result["shape_consistency_modularity"] = shape_modularity(
-            _shape_connectivities(adata_st, valid), labels
-        )
+        result["shape_consistency"] = state_variance_score(features[valid], labels)
 
     with open(output_data_dir / SHAPE_CONSISTENCY_JSON, "w") as f:
         json.dump(result, f, indent=4)

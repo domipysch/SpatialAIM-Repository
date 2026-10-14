@@ -1,9 +1,5 @@
-"""Validate one scRNA reference ``.h5ad`` against the SpatialAIM h5ad contract.
-
-Contract (see ``CLAUDE.md``): ``X`` raw counts, ``obs`` cell metadata with at
-least one cell-type column, ``var_names`` unique and uppercase gene symbols.
-When an ``scRNA/index.csv`` row is supplied, its ``CellTypeKey*`` /
-``NumberCellTypes*`` / ``CellCount`` / ``GeneCount`` cells are cross-checked too.
+"""
+Validate one scRNA reference ``.h5ad``.
 """
 
 from __future__ import annotations
@@ -28,10 +24,15 @@ __all__ = ["validate_sc"]
 
 def validate_sc(
     h5ad_path: Path,
-    index_row: "pd.Series | None" = None,
+    index_row: pd.Series | None = None,
     label: str = "sc",
-) -> tuple[list[str], list[str], "ad.AnnData | None"]:
-    """Return ``(errors, warns, adata)``; ``adata`` is None if it could not be read."""
+) -> tuple[list[str], list[str], ad.AnnData | None]:
+    """``(errors, warns, adata)`` for the reference; ``adata`` is ``None`` if
+    the file cannot be read.
+
+    Checks gene names (uppercase, unique) and that ``X`` holds raw counts. With
+    an ``scRNA/index.csv`` row, also its cell-type keys and counts.
+    """
     errors: list[str] = []
     warns: list[str] = []
 
@@ -70,11 +71,12 @@ def validate_sc(
 
 
 def _check_cell_type_keys(
-    adata: "ad.AnnData",
-    index_row: "pd.Series | None",
+    adata: ad.AnnData,
+    index_row: pd.Series | None,
     label: str,
 ) -> tuple[list[str], list[str]]:
-    """CellTypeKey0/1/2 must exist in obs; NumberCellTypes* must match its cardinality."""
+    """The index row's ``CellTypeKey0/1/2`` must be obs columns (error), with
+    as many types as its ``NumberCellTypes*`` says (warning)."""
     if index_row is None:
         return [], []
 

@@ -1,4 +1,5 @@
-"""Launcher for the SpatialAIM GUI.
+"""
+Launcher for the SpatialAIM GUI.
 
 Starts a Streamlit server running ``spatialaim/gui/app.py``. The only argument is the
 server port; everything else - the scRNA/ST paths, output directory, K step and

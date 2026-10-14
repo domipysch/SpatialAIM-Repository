@@ -1,4 +1,5 @@
-"""Figure production for the GUI.
+"""
+Figure production for the GUI.
 
 Every figure is an interactive Plotly object built here from data read straight
 off disk (each K's ``analysis/data`` folder) and, for the UMAP / marker /
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from anndata import AnnData
@@ -38,8 +40,8 @@ from spatialaim.analysis.loading import (
     load_start_cluster_to_state,
 )
 
-from spatialaim.analysis.utils import to_dense
-from spatialaim.metrics import kselection as scores
+from spatialaim.utils import to_dense
+from spatialaim.analysis import compare_ks as scores
 
 from . import data_access, state_names
 from .state_names import label as _state_label
@@ -926,40 +928,6 @@ def render_compare_reconstruction_figure(cossims: dict[str, dict]) -> go.Figure 
     )
     fig.update_yaxes(title_text="cosine similarity", row=1, col=1)
     fig.update_xaxes(tickangle=-30)
-    return fig
-
-
-def render_compare_box_figure(
-    data: dict[str, np.ndarray],
-    *,
-    title: str,
-    ytitle: str,
-    yrange: tuple[float, float] | None = None,
-    height: int = 300,
-) -> go.Figure:
-    """One box per mapper of the per-spot distribution in ``data`` (mapper ->
-    values). Used to compare mapping sharpness (max probability) and confidence."""
-    fig = go.Figure()
-    for i, (m, vals) in enumerate(data.items()):
-        fig.add_trace(
-            go.Box(
-                y=np.asarray(vals, dtype=float),
-                name=m,
-                marker_color=_mapper_color(i),
-                boxpoints=False,
-                showlegend=False,
-            )
-        )
-    _base_layout(
-        fig,
-        height=height,
-        font=_CARD_FONT,
-        title=dict(text=title, font=dict(size=13)),
-        yaxis_title=ytitle,
-        margin=dict(l=10, r=10, t=40, b=10),
-    )
-    if yrange is not None:
-        fig.update_yaxes(range=list(yrange))
     return fig
 
 
@@ -1880,7 +1848,7 @@ def _add_violin(
             opacity=0.75,
             box=dict(
                 visible=True,
-                width=0.12,
+                width=0.35,
                 fillcolor="white",
                 line=dict(color="#333333", width=1.5),
             ),
@@ -1999,6 +1967,121 @@ def render_state_coherence_figure(
     return _base_layout(fig, height=360, margin=dict(l=10, r=10, t=20, b=10))
 
 
+def _shape_panels(
+    features: pd.DataFrame, n_spots: int
+) -> tuple[tuple[tuple[np.ndarray, str], ...], np.ndarray]:
+    """The three shape panels as ``(values, axis title)`` -- log10 area (um^2
+    when the mask's pixel size is known, else pixels), eccentricity, solidity --
+    and the raw area. ``features`` is ``data_access.load_shape_features`` (spot
+    order)."""
+    if len(features) != n_spots:
+        raise ValueError(
+            f"cell_shape_features.csv has {len(features)} cells, the mapping {n_spots}"
+        )
+    use_um = bool(features["area_um2"].notna().any())
+    area = features["area_um2" if use_um else "area_px"].to_numpy(dtype=float)
+    panels = (
+        (np.log10(area), f"area [{'µm²' if use_um else 'px'}]"),
+        (features["eccentricity"].to_numpy(dtype=float), "eccentricity"),
+        (features["solidity"].to_numpy(dtype=float), "solidity"),
+    )
+    return panels, area
+
+
+def _log_area_ticks(fig: go.Figure, area: np.ndarray, *, row: int, col: int) -> None:
+    """Area is plotted as log10 so the densities are estimated on the log scale;
+    label that axis's ticks (1-2-5 steps) with the area itself."""
+    finite = np.log10(area[np.isfinite(area) & (area > 0)])
+    if not finite.size:
+        return
+    lo, hi = np.floor(finite.min()), np.ceil(finite.max())
+    ticks = [
+        t
+        for e in np.arange(lo, hi + 1)
+        for t in (e, e + np.log10(2), e + np.log10(5))
+        if finite.min() - 0.2 <= t <= finite.max() + 0.2
+    ]
+    fig.update_yaxes(
+        tickvals=ticks, ticktext=[f"{10 ** t:,.0f}" for t in ticks], row=row, col=col
+    )
+
+
+def render_shape_features_figure(
+    root: Path, k: int, hard: np.ndarray, features: pd.DataFrame
+) -> go.Figure:
+    """Per-cell shape features by mapped cell type: one panel each for area
+    (log scale), eccentricity and solidity, stacked over a shared x-axis of the
+    cell types. Each cell type with assigned, segmented cells gets a violin with
+    a box inside, in the per-state palette."""
+    hard = np.asarray(hard).astype(int)
+    panels, area = _shape_panels(features, len(hard))
+    names = _names_for(root, k)
+    palette = state_palette(k)
+    states = [s for s in range(k) if np.any((hard == s) & np.isfinite(area))]
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.06)
+    rng = np.random.default_rng(0)
+    for row, (vals, title) in enumerate(panels, start=1):
+        for s in states:
+            v = vals[(hard == s) & np.isfinite(vals)]
+            if v.size == 0:
+                continue
+            if v.size > _VIOLIN_MAX_CELLS:
+                v = rng.choice(v, _VIOLIN_MAX_CELLS, replace=False)
+            color = _hex(palette.get(s))
+            label = _state_label(s, names)
+            fig.add_trace(
+                go.Violin(
+                    x=np.full(v.size, label),
+                    y=v,
+                    name=label,
+                    line_color=color,
+                    fillcolor=color,
+                    opacity=0.75,
+                    box=dict(
+                        visible=True,
+                        width=0.15,
+                        fillcolor="white",
+                        line=dict(color="#333333", width=1),
+                    ),
+                    points=False,
+                    spanmode="hard",
+                    scalemode="width",
+                    showlegend=False,
+                    hoverinfo="name+y",
+                ),
+                row=row,
+                col=1,
+            )
+        fig.update_yaxes(title_text=title, row=row, col=1)
+    _log_area_ticks(fig, area, row=1, col=1)
+    fig.update_xaxes(tickangle=-30, row=3, col=1)
+    return _card_layout(fig, height=640, violinmode="overlay")
+
+
+def render_state_shape_figure(
+    root: Path, k: int, state: int, hard: np.ndarray, features: pd.DataFrame
+) -> go.Figure:
+    """Violins of area (log scale), eccentricity and solidity among the
+    segmented spots assigned to ``state`` vs. among all segmented spots, side
+    by side."""
+    hard = np.asarray(hard).astype(int)
+    panels, area = _shape_panels(features, len(hard))
+    label = _state_label(state, _names_for(root, k))
+    color = _hex(state_palette(k).get(int(state)))
+    rng = np.random.default_rng(0)
+    on = hard == int(state)
+    fig = make_subplots(rows=1, cols=3, horizontal_spacing=0.08)
+    for col, (vals, title) in enumerate(panels, start=1):
+        ok = np.isfinite(vals)
+        _add_violin(fig, vals[on & ok], label, color, rng, col=col, expressing=False)
+        _add_violin(
+            fig, vals[ok], "All cells", "#9e9e9e", rng, col=col, expressing=False
+        )
+        fig.update_yaxes(title_text=title, row=1, col=col)
+    _log_area_ticks(fig, area, row=1, col=1)
+    return _base_layout(fig, height=360, margin=dict(l=10, r=10, t=20, b=10))
+
+
 def render_self_enrichment_figure(
     root: Path, k: int, *, highlight: int | None = None
 ) -> go.Figure:
@@ -2052,7 +2135,7 @@ def _card_layout(fig: go.Figure, *, height: int, **extra) -> go.Figure:
 # --------------------------------------------------------------------------- #
 # Two rows of three cards, all linked client-side by ``widgets.linked_plot``: one
 # line card per criterion (its two measured curves plus their harmonic mean, see
-# spatialaim/metrics/kselection.py) and one scatter card per criterion pair (one dot per K, at its
+# spatialaim/analysis/compare_ks/scoring.py) and one scatter card per criterion pair (one dot per K, at its
 # two harmonic means). Every K-indexed trace carries ``customdata[i][0] = K`` --
 # that is what the linked-plot component keys hovering, highlighting and clicking
 # on; the scatter cards additionally stash their null-crosshair coordinates and

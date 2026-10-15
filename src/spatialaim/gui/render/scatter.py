@@ -39,6 +39,13 @@ logger = logging.getLogger(__name__)
 # Grey (as a CSS rgba string) for spots drawn below the confidence threshold.
 _GREY_RGBA = "rgba(184,184,184,0.9)"
 
+# The spatial panel draws each state in up to _MAX_CHUNKS interleaved chunks (see
+# add_spatial_traces), capped at _MAX_STATE_TRACES traces in all: 20 chunks for a
+# handful of states is all but a random order, while a K of 50 still gets 4
+# without the panel turning into thousands of WebGL traces.
+_MAX_CHUNKS = 20
+_MAX_STATE_TRACES = 200
+
 # --- EXPERIMENTAL: per-state centroid markers on the UMAP panels --------------
 # Hand-set switch (see the question in the session that added this). When True,
 # each UMAP panel gets one diamond marker per state at the state's *expression
@@ -373,40 +380,54 @@ def add_spatial_traces(
             col=col,
         )
 
-    for state in sorted(np.unique(hard[keep]).tolist()):
-        mask = keep & (hard == state)
-        show = state not in legend_shown
-        legend_shown.add(state)
-        genes = top_genes_suffix(top_genes, state)
-        head = f"{state_label(state, names)}{genes}"
-        if confidence is not None:
-            customdata = confidence[mask][:, None]
-            hovertemplate = (
-                f"{head}<br>"
-                "confidence %{customdata[0]:.3f}<br>"
-                "x %{x:.1f}  y %{y:.1f}<extra></extra>"
-            )
-        else:
-            customdata = None
-            hovertemplate = f"{head}<br>x %{{x:.1f}}  y %{{y:.1f}}<extra></extra>"
-        fig.add_trace(
-            go.Scattergl(
-                x=coords[mask, 0],
-                y=coords[mask, 1],
-                mode="markers",
-                marker=dict(
-                    size=dot_size, color=hex_color(palette.get(state)), opacity=1.0
+    # Draw order decides which colour wins where spots overlap: one trace per
+    # state, stacked by state id, lets the last states cover the others however
+    # rare they are. So each state is split into random chunks and the chunks are
+    # drawn round-robin (state 0 chunk 0, state 1 chunk 0, ..., state 0 chunk 1,
+    # ...), which comes close to a random order spot by spot. Every chunk is still
+    # a trace in its state's legendgroup, so the headline widget's toggling,
+    # clicks and hover work unchanged; only the first chunk carries the legend
+    # entry. The seed is fixed, so a rerun draws the same picture.
+    states = sorted(np.unique(hard[keep]).tolist())
+    n_chunks = max(1, min(_MAX_CHUNKS, _MAX_STATE_TRACES // max(1, len(states))))
+    chunk = np.random.default_rng(0).integers(n_chunks, size=len(hard))
+    for c in range(n_chunks):
+        for state in states:
+            mask = keep & (hard == state) & (chunk == c)
+            if not mask.any():
+                continue
+            show = state not in legend_shown
+            legend_shown.add(state)
+            genes = top_genes_suffix(top_genes, state)
+            head = f"{state_label(state, names)}{genes}"
+            if confidence is not None:
+                customdata = confidence[mask][:, None]
+                hovertemplate = (
+                    f"{head}<br>"
+                    "confidence %{customdata[0]:.3f}<br>"
+                    "x %{x:.1f}  y %{y:.1f}<extra></extra>"
+                )
+            else:
+                customdata = None
+                hovertemplate = f"{head}<br>x %{{x:.1f}}  y %{{y:.1f}}<extra></extra>"
+            fig.add_trace(
+                go.Scattergl(
+                    x=coords[mask, 0],
+                    y=coords[mask, 1],
+                    mode="markers",
+                    marker=dict(
+                        size=dot_size, color=hex_color(palette.get(state)), opacity=1.0
+                    ),
+                    name=state_label(state, names),
+                    legendgroup=f"state{state}",
+                    showlegend=show,
+                    meta="spatial",
+                    customdata=customdata,
+                    hovertemplate=hovertemplate,
                 ),
-                name=state_label(state, names),
-                legendgroup=f"state{state}",
-                showlegend=show,
-                meta="spatial",
-                customdata=customdata,
-                hovertemplate=hovertemplate,
-            ),
-            row=row,
-            col=col,
-        )
+                row=row,
+                col=col,
+            )
 
     _pin_spatial_axes(fig, coords, row=row, col=col, equal_aspect=equal_aspect)
 

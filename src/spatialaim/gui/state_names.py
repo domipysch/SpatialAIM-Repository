@@ -9,7 +9,11 @@ the same population whichever mapper placed it there. The names live in
     {"7": {"0": "Astrocytes", "3": "L2/3 IT"}, "12": {...}}
 
 Only the names actually set are stored; ``label`` falls back to ``Cell type <n>``
-for every other state, so a partly-named K is the normal case.
+for every other state, so a partly-named K is the normal case. A run started
+from an annotation (``--start_from_annotation``) is the exception at K = T (T =
+the number of annotated types): there the tree cut is the identity, so every
+state *is* one annotated type and defaults to that type's name
+(``annotation_names``); a name set by hand still wins.
 
 This is the GUI's only write path onto disk. Nothing in the sweep or the analysis
 reads the file -- losing it costs the labels and nothing else. Because the key is
@@ -22,7 +26,14 @@ from __future__ import annotations
 
 import json
 import logging
+from functools import lru_cache
 from pathlib import Path
+
+import pandas as pd
+
+from spatialaim.io import START_CLUSTER_TO_STATE_FILENAME, START_CLUSTERING_FILENAME
+
+from . import data_access
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +63,48 @@ def load_all(output_dir: Path) -> dict[str, dict[str, str]]:
     return data if isinstance(data, dict) else {}
 
 
-def load(output_dir: Path, k: int) -> dict[int, str]:
-    """``{state: name}`` for one K, holding only the states that have a name.
+def annotation_names(output_dir: Path, k: int) -> dict[int, str]:
+    """``{state: annotated type}`` when this output dir's runs start from an
+    annotation and ``k`` is T, the number of annotated types -- the level where
+    the tree cut is the identity, so each state is exactly one annotated type.
+    Empty for every other K, for Leiden starts, and when no run root has the
+    files yet. All mappers cut the same tree, so any run root serves."""
+    if data_access.start_from_annotation_from_config(output_dir) is None:
+        return {}
+    for root in sorted(Path(output_dir).glob("*/")):
+        clustering = root / START_CLUSTERING_FILENAME
+        cut = data_access.k_dir(root, k) / START_CLUSTER_TO_STATE_FILENAME
+        if clustering.exists() and cut.exists():
+            # mtimes in the key: a rerun into the same dir invalidates the cache.
+            return dict(
+                _annotation_names(
+                    str(clustering),
+                    str(cut),
+                    clustering.stat().st_mtime,
+                    cut.stat().st_mtime,
+                )
+            )
+    return {}
+
+
+@lru_cache(maxsize=32)
+def _annotation_names(
+    clustering: str, cut: str, _m1: float, _m2: float
+) -> tuple[tuple[int, str], ...]:
+    """``annotation_names`` for one run root's files (cached per file version)."""
+    names = data_access.load_start_cluster_names(Path(clustering).parent)
+    states = pd.read_csv(cut)["state"].to_numpy(dtype=int)
+    if (
+        names is None
+        or len(states) != len(names)
+        or int(states.max()) + 1 != len(names)
+    ):
+        return ()  # not the identity level: K != T
+    return tuple((int(s), n) for s, n in zip(states, names) if n)
+
+
+def _stored(output_dir: Path, k: int) -> dict[int, str]:
+    """``{state: name}`` for the names set by hand at this K.
 
     Tolerates hand-edits: entries with a non-numeric state or a blank name are
     skipped rather than surfacing as broken labels.
@@ -72,19 +123,28 @@ def load(output_dir: Path, k: int) -> dict[int, str]:
     return out
 
 
+def load(output_dir: Path, k: int) -> dict[int, str]:
+    """``{state: name}`` for one K, holding only the states that have a name:
+    the annotated type names at K = T of an annotation start
+    (``annotation_names``), overridden by any name set by hand."""
+    return annotation_names(output_dir, k) | _stored(output_dir, k)
+
+
 def save(output_dir: Path, k: int, names: dict[int, str]) -> None:
     """Replace this K's names, leaving every other K in the file untouched.
 
-    A blank name drops that state back to its default label instead of storing an
-    empty string, and a K with nothing left set drops out of the file entirely.
+    A blank name -- or one equal to the state's annotated type (see
+    ``annotation_names``) -- drops that state back to its default label instead
+    of being stored, and a K with nothing left set drops out of the file entirely.
     The write goes through a temp file and an atomic replace, so an interrupted
     save cannot leave a half-written file that would read back as no names at all.
     """
     data = load_all(output_dir)
+    defaults = annotation_names(output_dir, k)
     cleaned = {
         str(int(s)): n.strip()
         for s, n in names.items()
-        if isinstance(n, str) and n.strip()
+        if isinstance(n, str) and n.strip() and n.strip() != defaults.get(int(s))
     }
     if cleaned:
         data[str(int(k))] = cleaned
@@ -103,7 +163,7 @@ def set_name(output_dir: Path, k: int, state: int, name: str) -> None:
     """Set (or, when blank, clear) one state's name at this K, keeping the
     others -- the cell-type modal's write, through the same ``save`` as the
     all-states naming dialog."""
-    names = load(output_dir, k)
+    names = _stored(output_dir, k)
     names[int(state)] = name
     save(output_dir, k, names)
 

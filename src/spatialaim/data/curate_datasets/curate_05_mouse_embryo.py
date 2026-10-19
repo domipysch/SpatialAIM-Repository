@@ -46,7 +46,7 @@ have no effect on any analysis:
     ST    obsm["spatial"]        <= 5.4e-15   (Lohoff's affine-scaled units)
 
 ------------------------------------------------------------------------------
-scRNA  05_mouse-embryo.h5ad   —  16861 x 19362, mouse gastrulation atlas, E8.5
+scRNA  05_mouse-embryo.h5ad   —  16909 x 19371, mouse gastrulation atlas, E8.5
 ------------------------------------------------------------------------------
   counts  raw_counts.mtx.gz     (1.4 GB, 29452 genes x 139331 cells, MatrixMarket)
   meta    meta.tab.gz           (cell metadata; also holds the atlas UMAP)
@@ -54,14 +54,16 @@ scRNA  05_mouse-embryo.h5ad   —  16861 x 19362, mouse gastrulation atlas, E8.5
   sf      sizefactors.tab.gz    (one size factor per cell)
 
 Curation:
-  * cells = ``stage == "E8.5"`` and not ``doublet`` and not ``stripped`` and a
-           ``celltype`` that Lohoff et al. carried over (see ATLAS_TO_LOHOFF).
-           That last condition drops 48 cells of five types absent from the
-           spatial data (PGC, Visceral endoderm, Rostral neurectoderm, Parietal
-           endoderm, Notochord): 139331 -> 16909 -> 16861.
-  * obs["celltype"] = the atlas label mapped through ATLAS_TO_LOHOFF, which
-           merges Erythroid1/2/3, Blood progenitors 1/2 and renames five more —
-           24 atlas types become the 21 the spatial data uses.
+  * cells = ``stage == "E8.5"`` and not ``doublet`` and not ``stripped``:
+           139331 -> 16909
+  * obs["celltype"] = the atlas ``celltype`` exactly as published by
+           Pijuan-Sala et al. (29 types at E8.5). It is deliberately *not*
+           harmonised with the spatial labels: Lohoff et al.'s
+           celltype_mapped_refined was transferred from this atlas and then
+           refined into a partly different vocabulary (e.g. Cranial mesoderm,
+           Sclerotome), and no published one-to-one map between the two exists.
+           (01_Datasets_Used carried a STAMapper-style 21-type mapping instead,
+           with 48 cells of five types dropped; that is not reproduced.)
   * obs   also carries the 15 other meta.tab columns, ``sizeFactor``, and three
            Seurat-derived ones: ``orig.ident`` (constant 0),
            ``nCount_originalexp`` and ``nFeature_originalexp`` (column sums and
@@ -69,7 +71,7 @@ Curation:
            near-empty genes, so these are the same either way).
   * var   ENSEMBL, SYMBOL, SymbolUniq (R's ``make.unique``: duplicates get
            ".1", 41 of them), plus ``n_cells``
-  * genes are filtered to ``n_cells >= 3`` (29452 -> 19362), then the index is
+  * genes are filtered to ``n_cells >= 3`` (29452 -> 19371), then the index is
            the uppercased SymbolUniq with "_" replaced by "-". The substitution
            matters for exactly one gene, RMST_1 -> RMST-1: the shipped file went
            through Seurat, which forbids underscores in feature names.
@@ -158,7 +160,7 @@ SEQFISH_BYTES = 8_290_362
 SMFISH_URL = f"{SPATIAL}/smFISH_counts.Rds"
 SMFISH_BYTES = 1_114_194
 
-SC_EXPECTED = (16861, 19362)
+SC_EXPECTED = (16909, 19371)
 ST_EXPECTED = {
     "05_1_1_mouse-embryo": (10150, 351),
     "05_1_2_mouse-embryo": (7656, 351),
@@ -181,34 +183,6 @@ MASK_STEP_PX = 2.0  # original imaging pixels per mask pixel
 LOW_QUALITY = "Low quality"
 MIN_CELLS = 3
 
-# Atlas celltype -> the label Lohoff et al. use. Types absent from this map are
-# not in the spatial data and their cells are dropped.
-ATLAS_TO_LOHOFF = {
-    "Allantois": "Allantois",
-    "Blood progenitors 1": "Blood progenitors",
-    "Blood progenitors 2": "Blood progenitors",
-    "Cardiomyocytes": "Cardiomyocytes",
-    "Caudal Mesoderm": "Caudal Mesoderm",
-    "Def. endoderm": "Definitive endoderm",
-    "Endothelium": "Endothelium",
-    "Erythroid1": "Erythroid",
-    "Erythroid2": "Erythroid",
-    "Erythroid3": "Erythroid",
-    "ExE endoderm": "ExE endoderm",
-    "ExE mesoderm": "Lateral plate mesoderm",
-    "Forebrain/Midbrain/Hindbrain": "Forebrain/Midbrain/Hindbrain",
-    "Gut": "Gut tube",
-    "Haematoendothelial progenitors": "Haematoendothelial progenitors",
-    "Intermediate mesoderm": "Intermediate mesoderm",
-    "Mesenchyme": "Mesenchyme",
-    "NMP": "NMP",
-    "Neural crest": "Neural crest",
-    "Paraxial mesoderm": "Paraxial mesoderm",
-    "Pharyngeal mesoderm": "Splanchnic mesoderm",
-    "Somitic mesoderm": "Presomitic mesoderm",
-    "Spinal cord": "Spinal cord",
-    "Surface ectoderm": "Surface ectoderm",
-}
 # meta.tab columns 01_Datasets_Used keeps, in its order; sizeFactor is appended
 # from the separate file and the three Seurat columns are prepended.
 SC_META_COLUMNS = [
@@ -351,13 +325,10 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
     )
 
     selected = (
-        (meta["stage"] == "E8.5")
-        & ~meta["doublet"]
-        & ~meta["stripped"]
-        & meta["celltype"].isin(ATLAS_TO_LOHOFF)
+        (meta["stage"] == "E8.5") & ~meta["doublet"] & ~meta["stripped"]
     ).to_numpy()
     logger.info(
-        "  selected %d cells (E8.5, not doublet/stripped, celltype kept by Lohoff et al.)",
+        "  selected %d cells (E8.5, not doublet/stripped)",
         int(selected.sum()),
     )
 
@@ -370,7 +341,11 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
     obs.insert(2, "nFeature_originalexp", np.diff(X.indptr).astype(np.int32))
     for column in SC_INT_COLUMNS:
         obs[column] = obs[column].to_numpy().astype(np.int32)
-    obs["celltype"] = pd.Categorical([ATLAS_TO_LOHOFF[c] for c in obs["celltype"]])
+    if obs["celltype"].isna().any():
+        raise ValueError(
+            "selected atlas cells without a celltype — the source has changed"
+        )
+    obs["celltype"] = pd.Categorical(obs["celltype"].astype(str))
     obs["sizeFactor"] = sizefactor[selected]
 
     n_cells = np.diff(X.tocsc().indptr)

@@ -45,9 +45,9 @@ Curation:
            VISp cells — the QC categories (No Class, Low Quality, High Intronic,
            Batch Grouping, Doublet and blank) — leaving 14249.
   * X    = the release's **exon** matrix (introns are not used), float32
-  * obs["subclass"] = ``cell_subclass`` with "/" -> "and" and spaces removed,
-           so "L2/3 IT" becomes "L2and3IT" (23 subclasses)
-  * obs["celltype"] = those 23 mapped onto 12 (SUBCLASS_TO_CELLTYPE)
+  * obs["subclass"] = ``cell_subclass`` verbatim (23 subclasses, e.g. "L2/3 IT"),
+           the only label key. 01_Datasets_Used renamed them ("L2and3IT") and
+           added a 12-type coarsening; neither is reproduced.
   * var  index = the release's gene symbols through R's ``make.names`` and then
            uppercased. make.names matters: 1404 symbols start with a digit and
            gain an "X" prefix, and 853 contain a character it rewrites to "."
@@ -117,34 +117,35 @@ MIN_CELLS = 10
 CHUNK_ROWS = 2000
 REGION = "VISp"
 
-# Tasic's 23 subclasses (after normalisation) -> the 12 types of
-# 01_Datasets_Used. Cells whose cell_subclass is not a key here are the QC
-# categories and are dropped.
-SUBCLASS_TO_CELLTYPE = {
-    "Astro": "Astro",
-    "CR": "CR",
-    "Endo": "Endo",
-    "L2and3IT": "ExcitatoryL2and3",
-    "L4": "ExcitatoryL4",
-    "L5IT": "ExcitatoryL5and6",
-    "L5PT": "ExcitatoryL5and6",
-    "L6CT": "ExcitatoryL5and6",
-    "L6IT": "ExcitatoryL5and6",
-    "L6b": "ExcitatoryL5and6",
-    "NP": "ExcitatoryL5and6",
-    "Lamp5": "Inhibitory",
-    "Meis2": "Inhibitory",
-    "Pvalb": "Inhibitory",
-    "Serpinf1": "Inhibitory",
-    "Sncg": "Inhibitory",
-    "Sst": "Inhibitory",
-    "Vip": "Inhibitory",
-    "Macrophage": "Micro",
-    "Oligo": "Oligo",
-    "Peri": "Peri",
-    "SMC": "Smc",
-    "VLMC": "VLMC",
-}
+# Tasic's 23 subclasses, verbatim. Cells whose cell_subclass is not one of these
+# are Tasic's QC categories (or have no subclass) and are dropped.
+TASIC_SUBCLASSES = frozenset(
+    {
+        "Astro",
+        "CR",
+        "Endo",
+        "L2/3 IT",
+        "L4",
+        "L5 IT",
+        "L5 PT",
+        "L6 CT",
+        "L6 IT",
+        "L6b",
+        "Lamp5",
+        "Macrophage",
+        "Meis2",
+        "NP",
+        "Oligo",
+        "Peri",
+        "Pvalb",
+        "SMC",
+        "Serpinf1",
+        "Sncg",
+        "Sst",
+        "VLMC",
+        "Vip",
+    }
+)
 
 
 def _check_shape(adata: ad.AnnData, expected: tuple[int, int], what: str) -> None:
@@ -158,14 +159,6 @@ def _make_names(name: str) -> str:
     """R's ``make.names``: rewrite invalid characters, X-prefix a leading digit."""
     out = re.sub(r"[^A-Za-z0-9._]", ".", str(name))
     return f"X{out}" if out[:1].isdigit() else out
-
-
-def _normalise_subclass(values: pd.Series) -> pd.Series:
-    return (
-        values.astype(str)
-        .str.replace("/", "and", regex=False)
-        .str.replace(" ", "", regex=False)
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -185,9 +178,9 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
     )
 
     metadata = pd.read_csv(metadata_file, index_col=0, low_memory=False)
-    subclass = _normalise_subclass(metadata["cell_subclass"])
+    subclass = metadata["cell_subclass"]
     selected = (metadata["dissected_region"] == REGION) & subclass.isin(
-        SUBCLASS_TO_CELLTYPE
+        TASIC_SUBCLASSES
     )
     wanted = sorted(metadata.index[selected])
     logger.info(
@@ -237,8 +230,7 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
 
     chosen = subclass.loc[wanted]
     obs = pd.DataFrame(index=pd.Index(wanted, name=None))
-    obs["subclass"] = pd.Categorical(chosen.to_numpy())
-    obs["celltype"] = pd.Categorical([SUBCLASS_TO_CELLTYPE[s] for s in chosen])
+    obs["subclass"] = pd.Categorical(chosen.astype(str).to_numpy())
 
     adata = ad.AnnData(
         X=X[:, keep].astype(np.float32),
@@ -253,11 +245,7 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
         ),
     )
     _check_shape(adata, SC_EXPECTED, "scRNA")
-    logger.info(
-        "  subclass: %d -> celltype: %d",
-        adata.obs["subclass"].cat.categories.size,
-        adata.obs["celltype"].cat.categories.size,
-    )
+    logger.info("  subclass: %d types", adata.obs["subclass"].cat.categories.size)
     _common.write(adata, out_path)
 
 

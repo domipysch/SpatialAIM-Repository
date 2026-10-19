@@ -46,9 +46,9 @@ Curation:
   * obs   the object carries no cell-type annotation at all, so the labels come
            from the GitHub feature table, joined on the barcode:
              Sample              the replicate, "P60 R1".."P60 R4"
-             Cell.type           the paper's 17 types
-             cell_ontology_class 12 types, mapped from Cell.type (CELL_ONTOLOGY)
-             celltype            11 types, the above with the glial classes merged
+             Cell.type           the paper's 17 types, used exactly as published
+                                 (the only label key; no ontology mapping or
+                                 merging, unlike 01_Datasets_Used)
 
 ------------------------------------------------------------------------------
 ST  06_<sample>_<slice>_mouse-retina.h5ad   —  72 slices
@@ -133,29 +133,6 @@ ST_SAMPLES = [
     "VZG105a_WT3",
     "VZG105a_WT4",
 ]
-
-# Hoang et al.'s 17 types -> cell ontology (12).
-CELL_ONTOLOGY = {
-    "Activated MG": "macroglial cell",
-    "Astrocytes": "macroglial cell",
-    "Cones": "retinal cone cell",
-    "GABAergic AC": "amacrine cell",
-    "Glycinergic AC": "amacrine cell",
-    "HC": "retina horizontal cell",
-    "Microglia": "microglial cell",
-    "OFF cone BC": "retinal bipolar neuron",
-    "ON cone BC": "retinal bipolar neuron",
-    "Pericytes": "pericyte cell",
-    "RGC": "retinal ganglion cell",
-    "RPE": "retinal pigment epithelial cell",
-    "Resting MG": "macroglial cell",
-    "Reticulocytes": "reticulocyte",
-    "Rod BC": "retinal bipolar neuron",
-    "Rods": "retinal rod cell",
-    "V/E cells": "blood vessel endothelial cell",
-}
-# ...and the two glial ontology classes merged, giving obs["celltype"] (11).
-GLIAL_CLASSES = frozenset({"macroglial cell", "microglial cell"})
 
 # ST majorclass -> celltype.
 MAJOR_CLASS = {
@@ -377,29 +354,14 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
         )
     rows = features.loc[cells]
 
-    cell_type = rows["Cell.type"].astype(str).to_numpy()
-    unmapped = sorted(set(cell_type) - set(CELL_ONTOLOGY))
-    if unmapped:
-        raise KeyError(f"CELL_ONTOLOGY does not cover {unmapped}")
-    ontology = np.array([CELL_ONTOLOGY[c] for c in cell_type])
-
     obs = pd.DataFrame(index=pd.Index(cells, name=None))
     obs["Sample"] = pd.Categorical(rows["Sample"].astype(str).to_numpy())
-    obs["Cell.type"] = pd.Categorical(cell_type)
-    obs["cell_ontology_class"] = pd.Categorical(ontology)
-    obs["celltype"] = pd.Categorical(
-        ["glial cell" if o in GLIAL_CLASSES else o for o in ontology]
-    )
+    obs["Cell.type"] = pd.Categorical(rows["Cell.type"].astype(str).to_numpy())
 
     adata = ad.AnnData(X=X, obs=obs, var=pd.DataFrame(index=_common.uppercase(genes)))
     adata.var_names.name = None
     _check_shape(adata, SC_EXPECTED, "scRNA")
-    logger.info(
-        "  Cell.type: %d -> cell_ontology_class: %d -> celltype: %d",
-        adata.obs["Cell.type"].cat.categories.size,
-        adata.obs["cell_ontology_class"].cat.categories.size,
-        adata.obs["celltype"].cat.categories.size,
-    )
+    logger.info("  Cell.type: %d types", adata.obs["Cell.type"].cat.categories.size)
     _common.write(adata, out_path)
 
 

@@ -36,10 +36,8 @@ Curation:
            ``cell_ontology_class`` is taken from the metadata CSV — Liu et al.
            relabelled the TMS classes into zonated types ("pericentral
            hepatocyte", "periportal endothelial cell", ...), and the TMS file
-           still holds the original labels
-  * obs["celltype"] = ``cell_ontology_class`` with the four immune classes
-           (B cell, NK cell, myeloid leukocyte, plasmacytoid dendritic cell)
-           merged into "immune cell" -> 12 classes become 9
+           still holds the original labels. These 12 classes are the reference's
+           only label key, used exactly as published (no further merging).
 
 The TMS h5ad is in the legacy AnnData layout (compound obs/var dtypes,
 ``raw.X``/``raw.var`` as top-level groups); anndata reads it with FutureWarnings
@@ -145,10 +143,6 @@ SC_OBS_COLUMNS = [
     "tissue",
     "tissue_free_annotation",
 ]
-# cell_ontology_class values folded into "immune cell" to form obs["celltype"].
-SC_IMMUNE_CLASSES = frozenset(
-    {"B cell", "NK cell", "myeloid leukocyte", "plasmacytoid dendritic cell"}
-)
 # celltype -> celtype; anything absent keeps its name.
 ST_COARSE_TYPES = {
     "bile duct epithelial cell": "duct epithelial cell",
@@ -216,9 +210,6 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
     # still carries the originals, so this column comes from the metadata CSV.
     relabelled = metadata["cell_ontology_class"].to_numpy()
     obs["cell_ontology_class"] = pd.Categorical(relabelled)
-    obs["celltype"] = pd.Categorical(
-        ["immune cell" if c in SC_IMMUNE_CLASSES else c for c in relabelled]
-    )
 
     adata = ad.AnnData(
         X=tms.raw.X[position].astype(np.float32),
@@ -230,9 +221,8 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
     )
     _check_shape(adata, SC_EXPECTED, "scRNA")
     logger.info(
-        "  cell_ontology_class: %d classes -> celltype: %d",
+        "  cell_ontology_class: %d classes",
         adata.obs["cell_ontology_class"].cat.categories.size,
-        adata.obs["celltype"].cat.categories.size,
     )
     _common.write(adata, out_path)
 

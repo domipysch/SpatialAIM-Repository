@@ -18,7 +18,7 @@ sides then reproduce bit-exactly. Plus three files read
 out of the Vizgen run export zip for the segmentation mask (see ST below).
 
 ------------------------------------------------------------------------------
-scRNA  04_mouse-kidney.h5ad   —  2327 x 20138, Tabula Muris Senis droplet kidney
+scRNA  04_mouse-kidney.h5ad   —  2330 x 20138, Tabula Muris Senis droplet kidney
 ------------------------------------------------------------------------------
 Counts and genes come from Tabula Muris Senis, not from the MERFISH project:
 the paper reuses TMS as its 10x reference and only re-annotates it.
@@ -31,22 +31,23 @@ the paper reuses TMS as its 10x reference and only re-annotates it.
           mousekidney_celltype_relabeling.csv (the paper's own MACA -> ontology map)
 
 Curation:
+  * cells = all 2330 rows of the metadata CSV, in its order, index = ``cell``
   * obs  comes wholly from the metadata CSV (unlike 03, where it came from TMS):
-           its 12 columns minus ``n_counts``, index = ``cell``. Its ``n_genes``
-           column is empty throughout, which is why 01_Datasets_Used carries an
-           all-NaN float64 ``n_genes`` — reproduced by coercing the empty strings.
-  * obs["celltype"] = the CSV's 22 MACA classes pushed through the published
-           relabeling map and then coarsened once more (the map's own targets
-           are finer than the shipped file): lymphocyte / macrophage /
-           leukocyte / plasma cell -> "immune cell", glomerular capillary
-           endothelial cell / kidney blood vessel cell -> "endothelial cell".
-           22 classes become 9.
-           01_Datasets_Used also carries a ``cell_ontology_class`` column that
-           is byte-for-byte identical to ``celltype``; the duplicate is dropped.
-  * the 3 cells the map leaves as "kidney cell" (an unusable catch-all) are
-           dropped, which is exactly the CSV's 2330 -> the shipped 2327.
+           its 12 columns minus ``n_counts`` and ``free_annotation``. Its
+           ``n_genes`` column is empty throughout and is kept as all-NaN float64.
+  * the two label keys, both used exactly as published (no merging by us):
+           obs["cell_ontology_class"]   = the CSV's column, the 22 TMS (MACA)
+                                          classes
+           obs["cell_ontology_relabel"] = those 22 pushed through Liu et al.'s
+                                          relabeling map (column "Cell ontology
+                                          relabel"): 13 classes, including the
+                                          catch-all "kidney cell" (3 cells); the
+                                          map's 14th target, "plasma cell", has
+                                          no cells here
+           TMS's free-text ``free_annotation`` is dropped: it is not used, and
+           235 of its cells are the literal string "nan".
   * X    = the TMS object's ``raw.X`` (raw counts, sparse CSR float32), rows
-           subset to those 2327 cells **in the metadata CSV's order**
+           subset to those 2330 cells **in the metadata CSV's order**
   * var  index = ``raw.var`` gene symbols uppercased, keeping ``n_cells``
            (which counts over the whole droplet atlas, not just kidney)
 
@@ -134,20 +135,19 @@ ST_ANN_BYTES = 195_688_374
 METADATA_MEMBER = "symphony/MACAkidney_10x_metadata.csv"
 RELABEL_COLUMN = "Cell ontology relabel"
 
-SC_EXPECTED = (2327, 20138)
+SC_EXPECTED = (2330, 20138)
 EXPORT_URL = f"{FIGSHARE}/37020589"  # MsKidney_CellBoundary_VZG116_111921.zip
 MASK_PIXEL_UM = 0.25
 
 ST_EXPECTED = (126547, 307)
 
-# The metadata columns carried over, in 01_Datasets_Used's order. The CSV's
-# n_counts is dropped, and so is cell_ontology_class — it is rebuilt below as
-# obs["celltype"], and 01_Datasets_Used holds the two as identical copies.
+# The metadata columns carried over. The CSV's n_counts and free_annotation are
+# dropped; obs["cell_ontology_relabel"] is added below.
 SC_OBS_COLUMNS = [
     "age",
     "cell",
+    "cell_ontology_class",
     "cell_ontology_id",
-    "free_annotation",
     "method",
     "mouse.id",
     "n_genes",
@@ -156,18 +156,6 @@ SC_OBS_COLUMNS = [
     "tissue",
     "tissue_free_annotation",
 ]
-# Applied on top of the published relabeling map, whose targets are still finer
-# than the nine classes 01_Datasets_Used carries.
-SC_COARSE_TYPES = {
-    "lymphocyte": "immune cell",
-    "macrophage": "immune cell",
-    "leukocyte": "immune cell",
-    "plasma cell": "immune cell",
-    "glomerular capillary endothelial cell": "endothelial cell",
-    "kidney blood vessel cell": "endothelial cell",
-}
-# The map's catch-all target; those cells are not in 01_Datasets_Used.
-SC_DROPPED_TYPE = "kidney cell"
 
 
 def _upper_index(names) -> pd.Index:
@@ -214,11 +202,7 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
     unmapped = sorted({c for c in classes if c not in relabel})
     if unmapped:
         raise KeyError(f"the relabeling map no longer covers {unmapped}")
-    labels = np.array([SC_COARSE_TYPES.get(relabel[c], relabel[c]) for c in classes])
-
-    keep = labels != SC_DROPPED_TYPE
-    logger.info("  dropped %d %r cells", int((~keep).sum()), SC_DROPPED_TYPE)
-    metadata, labels = metadata[keep], labels[keep]
+    relabelled = np.array([relabel[c] for c in classes])
 
     tms = ad.read_h5ad(tms_file)
     if tms.raw is None:
@@ -241,11 +225,12 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
 
     obs = metadata[SC_OBS_COLUMNS].copy()
     obs.index = pd.Index(wanted, name=None)
-    # the CSV's n_genes is empty throughout; 01_Datasets_Used keeps it as NaN
+    # the CSV's n_genes is empty throughout; kept as NaN
     obs["n_genes"] = pd.to_numeric(metadata["n_genes"], errors="coerce").astype(
         "float64"
     )
-    obs["celltype"] = pd.Categorical(labels)
+    obs["cell_ontology_class"] = pd.Categorical(classes)
+    obs["cell_ontology_relabel"] = pd.Categorical(relabelled)
 
     adata = ad.AnnData(
         X=tms.raw.X[position].astype(np.float32),
@@ -257,9 +242,9 @@ def build_scrna(tmp_dir: Path, out_path: Path) -> None:
     )
     _check_shape(adata, SC_EXPECTED, "scRNA")
     logger.info(
-        "  %d MACA classes -> %d cell_ontology_class / celltype",
-        len(set(classes)),
-        adata.obs["celltype"].cat.categories.size,
+        "  cell_ontology_class: %d classes -> cell_ontology_relabel: %d",
+        adata.obs["cell_ontology_class"].cat.categories.size,
+        adata.obs["cell_ontology_relabel"].cat.categories.size,
     )
     _common.write(adata, out_path)
 

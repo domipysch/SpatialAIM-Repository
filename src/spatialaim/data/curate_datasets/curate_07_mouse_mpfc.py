@@ -52,6 +52,8 @@ Curation:
            Sample, treatment, Period, stage, L2_clusters, DevStage) plus
            ``celltype``. 01_Datasets_Used also has ``CellType``, which is a
            byte-for-byte duplicate of ``celltype``; the duplicate is dropped.
+           Both label keys are the authors' own, unchanged: ``celltype`` (8
+           types) and their finer ``L2_clusters`` (98 subclusters).
 
 ------------------------------------------------------------------------------
 ST  07_1..07_3_mouse-mpfc.h5ad   —  166 genes each

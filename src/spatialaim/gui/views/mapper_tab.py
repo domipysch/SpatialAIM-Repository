@@ -1,6 +1,7 @@
 """
 One mapper's tab: its run progress while computing, then the "Choose K" card,
-the headline UMAP(s) + spatial map with the confidence controls, and the report.
+the headline UMAP(s) + spatial map with the confidence controls, the ST
+marker-gene dotplot of the assigned cell types, and the report.
 """
 
 from __future__ import annotations
@@ -15,7 +16,8 @@ from spatialaim.gui import compute, data_access
 from spatialaim.gui.loaders import load_scaffold, load_soft, spatial_coords
 from spatialaim.gui.render.common import SpatialContext
 from spatialaim.gui.render.headline import render_headline_figure
-from spatialaim.gui.views.cards import export_popover
+from spatialaim.gui.render.markers import render_state_markers_figure
+from spatialaim.gui.views.cards import export_popover, plot_card
 from spatialaim.gui.views.cell_type_modal import open_cell_type_dialog, reopened_state
 from spatialaim.gui.views.choose_k import render_choose_k
 from spatialaim.gui.views.controls import Controls
@@ -159,6 +161,71 @@ def _headline(
         st.caption("ST data has no obsm['spatial'] — no spatial plot.")
 
 
+def _state_markers_card(
+    mapper: str, root: Path, k: int, args: argparse.Namespace
+) -> None:
+    """The reference tab's marker-gene dotplot, drawn for the ST spots grouped
+    by this mapper's hard assignment at ``k``."""
+    with st.expander("Assigned cell type marker genes (ST)", expanded=False):
+        adata_sc = load_scaffold(args, warn="Scaffold build failed — no marker genes")
+        if adata_sc is None:
+            return
+        n_genes = st.number_input(
+            "Genes per cell type",
+            min_value=1,
+            max_value=25,
+            value=5,
+            step=1,
+            key=f"tab_{mapper}_markers_n",
+            help="Top-ranked shared genes shown per assigned cell type "
+            "(scanpy rank_genes_groups, Wilcoxon, each type's spots vs. the "
+            "rest, on the ST lognorm).",
+        )
+        _P, hard, _conf = load_soft(str(root), k)
+        fig_mk = render_state_markers_figure(
+            adata_sc,
+            root,
+            k,
+            n_genes=int(n_genes),
+            spatial=SpatialContext(str(args.stdata), hard, None),
+        )
+        if fig_mk is None:
+            st.info(
+                "Marker genes need at least two shared genes and two assigned "
+                "cell types with two or more spots each, and the mapping must "
+                "match the ST file's spots."
+            )
+        else:
+            plot_card(
+                fig_mk,
+                key=f"tab_{mapper}_markers",
+                stem=f"{mapper}_st_marker_genes_k{k:03d}_n{int(n_genes)}",
+                caption="Spots grouped by their hard assignment (argmax of the "
+                "soft mapping). Dot size: fraction of the cell type's spots "
+                "expressing the gene. Colour: mean ST lognorm expression, scaled "
+                "0–1 per gene across cell types. Hover for the Wilcoxon score and "
+                "adjusted p-value.",
+            )
+
+        # The reference tab's card, for direct comparison (same K and gene count).
+        st.markdown("**Reference (scRNA) for comparison**")
+        fig_ref = render_state_markers_figure(adata_sc, root, k, n_genes=int(n_genes))
+        if fig_ref is None:
+            st.info(
+                "Marker genes need at least two shared genes and two cell types "
+                "with two or more cells each."
+            )
+            return
+        plot_card(
+            fig_ref,
+            key=f"tab_{mapper}_ref_markers",
+            stem=f"reference_marker_genes_k{k:03d}_n{int(n_genes)}",
+            caption="Dot size: fraction of the cell type's cells expressing the "
+            "gene. Colour: mean lognorm expression, scaled 0–1 per gene across "
+            "cell types. Hover for the Wilcoxon score and adjusted p-value.",
+        )
+
+
 def _render_progress(mapper: str, run: compute.MapperRun) -> None:
     """Progress bar for a mapper currently being computed."""
     done, expected = run.n_done(), run.n_expected()
@@ -232,6 +299,9 @@ def mapper_tab(
         show_shared_umap=ctrl.show_shared_umap,
         conf_controls=True,
     )
+
+    st.divider()
+    _state_markers_card(mapper, root, ctrl.k, args)
 
     st.divider()
     st.subheader("Report")

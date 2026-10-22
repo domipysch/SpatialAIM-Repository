@@ -305,7 +305,12 @@ _DOTPLOT_MARGIN = dict(l=10, r=10, t=24, b=90)
 
 
 def render_state_markers_figure(
-    adata_sc: AnnData, root: Path, k: int, *, n_genes: int = 5
+    adata_sc: AnnData,
+    root: Path,
+    k: int,
+    *,
+    n_genes: int = 5,
+    spatial: SpatialContext | None = None,
 ) -> go.Figure | None:
     """Dotplot of each computed cell type's top ``n_genes`` marker genes
     (``rank_genes_groups``, Wilcoxon vs. rest, shared genes), in the style of
@@ -314,12 +319,15 @@ def render_state_markers_figure(
     Rows are cell types; columns are each tested type's markers in turn (a gene
     can recur under several types), grouped under a bar in that type's colour.
     Dot area = fraction of the row's cells expressing the gene; dot colour = the
-    row's mean lognorm expression, min-max scaled per gene across rows. Returns
-    ``None`` when the ranking is unavailable (see ``_state_markers``).
+    row's mean lognorm expression, min-max scaled per gene across rows. With
+    ``spatial`` the same plot is drawn for the ST spots, grouped by this mapper's
+    hard assignment (``_spatial_state_markers``). Returns ``None`` when the
+    ranking is unavailable (see ``_state_markers``).
     """
-    mk = _state_markers(adata_sc, str(root), int(k))
+    mk = _markers(adata_sc, root, k, spatial)
     if mk is None:
         return None
+    obs_word = "cells" if spatial is None else "spots"
     states, genes = mk["states"], mk["genes"]
     names = names_for(root, k)
     palette = state_palette(k)
@@ -383,7 +391,7 @@ def render_state_markers_figure(
             customdata=custom,
             hovertemplate=(
                 "%{customdata[0]}<br><b>%{customdata[1]}</b>"
-                "<br>expressed in %{customdata[2]:.0%} of cells"
+                f"<br>expressed in %{{customdata[2]:.0%}} of {obs_word}"
                 "<br>mean lognorm %{customdata[3]:.2f}"
                 "<br>score %{customdata[4]:.1f} · p_adj %{customdata[5]:.1e}"
                 "<extra></extra>"
@@ -441,10 +449,10 @@ def render_state_markers_figure(
             range=[n_rows - 0.5, -0.5],
             showgrid=False,
             zeroline=False,
-            title="Computed cell type",
+            title="Computed cell type" if spatial is None else "Assigned cell type",
         ),
         legend=dict(
-            title=dict(text="Fraction of cells<br>in group"),
+            title=dict(text=f"Fraction of {obs_word}<br>in group"),
             itemsizing="trace",
             x=1.02,
             xanchor="left",

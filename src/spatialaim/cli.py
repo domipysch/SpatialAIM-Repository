@@ -142,6 +142,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     duplicates = sorted({a for a in annotations if annotations.count(a) > 1})
     if duplicates:
         _fail(f"--annotation given more than once: {duplicates}")
+    if args.no_leiden_start and not annotations:
+        _fail("--no_leiden_start needs at least one --annotation")
     config = SpatialAIMConfig(
         mapping=args.mapping,
         leiden_resolution=args.leiden_resolution,
@@ -149,6 +151,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         k_min=args.k_min,
         k_max=args.k_max,
         k_step=args.k_step,
+        leiden_start=not args.no_leiden_start,
         annotations=annotations,
     )
 
@@ -297,13 +300,21 @@ def _add_run_parser(sub: argparse._SubParsersAction) -> None:
         default=None,
         metavar="OBS_COLUMN",
         help="Additionally start the agglomeration from these pre-existing "
-        "annotations (scRNA obs columns; repeatable). The sweep always runs from "
-        "the Leiden over-clustering into <output_dir>/leiden/<mapper>/, and once "
+        "annotations (scRNA obs columns; repeatable). The sweep runs from the "
+        "Leiden over-clustering into <output_dir>/leiden/<mapper>/ (unless "
+        "--no_leiden_start), and once "
         "per annotation into <output_dir>/annotation_<OBS_COLUMN>/<mapper>/, "
         "where the annotation's cell types are the start clusters and K sweeps "
         "from their number down. Every annotation must label every cell; a "
         "missing column or an unlabelled cell is an error (in batch mode: that "
         "pair fails).",
+    )
+    p.add_argument(
+        "--no_leiden_start",
+        action="store_true",
+        help="Skip the sweep from the Leiden over-clustering: only the --annotation "
+        "starts run. The reference scaffold (Leiden included) is still built or "
+        "reused.",
     )
     p.add_argument("--leiden_resolution", type=float, default=3.0)
     p.add_argument(

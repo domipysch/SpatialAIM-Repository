@@ -162,6 +162,7 @@ The **start clusters** the tree is built over come from the Leiden over-clusteri
 Pass `--annotation <obs_column> [<obs_column> ...]` to additionally start from pre-existing annotations: the sweep then runs once from the Leiden clusters
 and once per annotation, whose cell types become the start clusters (`K` sweeps from the number of annotated types down).
 Every annotation must label every cell; a missing column or an unlabelled cell is an error (in batch mode, that pair fails).
+`--no_leiden_start` skips the Leiden sweep, so only the `--annotation` starts run (the reference scaffold is still built or reused).
 
 **Single pair**
 
@@ -172,7 +173,7 @@ spatialaim run --scdata path/to/sc.h5ad \
 		[--segmentation path/to/mask.tif] \
 		[--mapping nearest_centroid|wann|tangram|tacco|dot] \
 		[--linkage_method average|ward] \
-		[--annotation <obs_column> ...] \
+		[--annotation <obs_column> ...] [--no_leiden_start] \
 		[--leiden_resolution 3.0] \
 		[--k_min 1] [--k_max <L>] [--k_step 1] \
 		[--logging verbose]
@@ -189,7 +190,7 @@ spatialaim run --pairs_csv path/to/pairs.csv \
 		--output_dir path/to/out_dir \
 		[--mapping nearest_centroid|wann|tangram|tacco|dot] \
 		[--linkage_method average|ward] \
-		[--annotation <obs_column> ...] \
+		[--annotation <obs_column> ...] [--no_leiden_start] \
 		[--leiden_resolution 3.0] \
 		[--k_min 1] [--k_max <L>] [--k_step 1] \
 		[--logging verbose]
@@ -202,6 +203,7 @@ Each pair is written to `<out_dir>/<PairID>_<scName>__<stName>/`.
 ```
 <out_dir>/
 ├── reference_scaffold.h5ad        # cached reference preparation, shared by all starts and mappers
+├── timing.csv                     # wall-clock seconds of the scaffold read or build (last call)
 ├── cell_shape_features.csv        # only with a segmentation mask: area, eccentricity, solidity per cell
 └── <start>/                       # leiden/, plus annotation_<obs_column>/ per --annotation
     ├── start_clustering.h5ad      # each reference cell's start cluster (shared by the mappers)
@@ -212,7 +214,8 @@ Each pair is written to `<out_dir>/<PairID>_<scName>__<stName>/`.
         │   ├── start_cluster_to_state.csv        # which state each start cluster belongs to
         │   └── analysis/                         # the metrics for this K (the GUI plots them)
         ├── k_comparison.csv       # one row per K: all metrics and the K-selection scores
-        └── k_selection.json       # the suggested K, overall and per criterion
+        ├── k_selection.json       # the suggested K, overall and per criterion
+        └── timing.csv             # wall-clock seconds per K of the mapping and of the analysis
 ```
 
 **Sample-dataset example:**

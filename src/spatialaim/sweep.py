@@ -25,6 +25,7 @@ from spatialaim.analysis.shape_consistency import (
     write_shape_features,
 )
 from spatialaim.config import SpatialAIMConfig
+from spatialaim.timing import PhaseTimer
 from .aggregation import compute_start_cluster_aggregates
 from .clustering import (
     check_annotation,
@@ -69,6 +70,10 @@ def run(
        (``k_<kkk>/``); then compare all Ks (``k_comparison.csv``,
        ``k_selection.json``).
 
+    Wall-clock times go to ``timing.csv`` (see :mod:`spatialaim.timing`): the
+    reference scaffold (read or built) in ``root_output_folder``, and per K the
+    mapping and the analysis in each start's ``<start>/<mapper>/``.
+
     ``segmentation_path`` is the ST slice's optional segmentation mask; with it
     the analysis also scores shape consistency, and the per-cell shape features
     are written once to ``<root>/cell_shape_features.csv``.
@@ -101,15 +106,18 @@ def run(
     key = reference_scaffold_key(
         sc_path, st_path, shared_genes, config.leiden_resolution
     )
-    cached = read_reference_scaffold(root_output_folder, key)
-    if cached is not None:
-        adata_sc = cached
-        _preprocess_st(adata_st, adata_sc.uns[UNS_SHARED_GENES])
-    else:
-        pre_processing(adata_sc, adata_st)
-        build_reference_scaffold(adata_sc, config.leiden_resolution)
-        adata_sc = restrict_to_shared_genes(adata_sc)
-        write_reference_scaffold(root_output_folder, adata_sc, key)
+    timer = PhaseTimer()
+    with timer.phase("scaffold"):
+        cached = read_reference_scaffold(root_output_folder, key)
+        if cached is not None:
+            adata_sc = cached
+            _preprocess_st(adata_st, adata_sc.uns[UNS_SHARED_GENES])
+        else:
+            pre_processing(adata_sc, adata_st)
+            build_reference_scaffold(adata_sc, config.leiden_resolution)
+            adata_sc = restrict_to_shared_genes(adata_sc)
+            write_reference_scaffold(root_output_folder, adata_sc, key)
+    timer.write(root_output_folder)
 
     # 3. One sweep per start
     for start_from_annotation, folder in zip(starts, folders):
@@ -145,7 +153,8 @@ def _sweep_one_start(
     config: SpatialAIMConfig,
 ) -> None:
     """The tree, the K-sweep and the K comparison for the start clusters set
-    in ``adata_sc``, into ``mapping_output_folder``."""
+    in ``adata_sc``, into ``mapping_output_folder``; each K's mapping and
+    analysis timed into its ``timing.csv``."""
     # Tree and its cuts
     tree = build_agglomeration_tree(
         adata_sc.uns[UNS_START_CLUSTER_CENTROIDS_SHARED_GENES],
@@ -156,26 +165,30 @@ def _sweep_one_start(
     labels_by_k = {k: labels_at_k(tree, k, n_start_clusters) for k in ks}
 
     # Map and analyse every K
+    timer = PhaseTimer()
     mapper = config.build_mapper()
     mapper.prepare(adata_sc, adata_st, labels_by_k)
     try:
         for k in ks:
-            spot_to_state, confidence = mapper.map(labels_by_k[k], k)
-            run_dir = mapping_output_folder / f"k_{k:03d}"
-            run_dir.mkdir(parents=True, exist_ok=True)
-            write_run_outputs(
-                run_dir=run_dir,
-                spot_to_state=spot_to_state,
-                confidence=confidence,
-                labels_k=labels_by_k[k],
-                n_start_clusters=n_start_clusters,
-                k=k,
-                adata_st=adata_st,
-            )
-            logger.info("K=%3d mapped -> %s", k, run_dir)
-            run_analysis(adata_sc, adata_st, run_dir)
+            with timer.phase("map", k):
+                spot_to_state, confidence = mapper.map(labels_by_k[k], k)
+            with timer.phase("analysis", k):
+                run_dir = mapping_output_folder / f"k_{k:03d}"
+                run_dir.mkdir(parents=True, exist_ok=True)
+                write_run_outputs(
+                    run_dir=run_dir,
+                    spot_to_state=spot_to_state,
+                    confidence=confidence,
+                    labels_k=labels_by_k[k],
+                    n_start_clusters=n_start_clusters,
+                    k=k,
+                    adata_st=adata_st,
+                )
+                logger.info("K=%3d mapped -> %s", k, run_dir)
+                run_analysis(adata_sc, adata_st, run_dir)
     finally:
         mapper.close()  # e.g. stops a reference aligner's worker process
+    timer.write(mapping_output_folder)
 
     # Compare the Ks
     logger.info("Comparing K-runs...")

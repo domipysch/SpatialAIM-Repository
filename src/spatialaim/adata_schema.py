@@ -8,8 +8,11 @@ Convention for the sc/st AnnData objects.
 # -------------------- adata_sc --------------------
 
 
-# (n_cells,) int — start-cluster label (0..L-1): the all-gene Leiden over-cluster, or the annotated type in start-from-annotation mode
+# (n_cells,) int — start-cluster label (0..L-1) of the current start: the all-gene Leiden over-cluster, or the annotated type for an annotation start
 OBS_START_CLUSTER = "start_cluster"
+
+# (n_cells,) int — all-gene Leiden over-cluster label; part of the start-independent scaffold, copied into OBS_START_CLUSTER for the Leiden start
+OBS_LEIDEN_ALL_GENES = "leiden_all_genes"
 
 # (n_cells,) int — Leiden label from shared genes only
 OBS_LEIDEN_SHARED_GENES = "leiden_shared_genes"
@@ -23,7 +26,7 @@ UNS_N_START_CLUSTERS = "n_start_clusters"
 # list[str] — display name per start cluster, index-aligned to OBS_START_CLUSTER: the annotated type names, or "cluster_<i>" in Leiden mode
 UNS_START_CLUSTER_NAMES = "start_cluster_names"
 
-# float — resolution of the all-gene Leiden over-clustering (absent in start-from-annotation mode)
+# float — resolution of the all-gene Leiden over-clustering
 UNS_LEIDEN_RESOLUTION_ALL_GENES = "leiden_resolution"
 
 # float — resolution (shared genes)
@@ -90,7 +93,7 @@ OBS_MAPPING_CONFIDENCE = "mapping_confidence"
 
 # obsm/obsp/uns — K-independent spatial/expression graphs, built once and reused across the K-sweep
 
-# (n_spots x n_spots) sparse — squidpy spatial KNN graph (local purity + neighbourhood enrichment)
+# (n_spots x n_spots) sparse — squidpy spatial KNN graph (the spatial assortativity)
 OBSP_SPATIAL_CONNECTIVITIES = "spatial_connectivities"
 
 # (n_spots x n_spots) sparse — ST all-gene expression KNN graph for the mapping modularity

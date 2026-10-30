@@ -25,7 +25,6 @@ from spatialaim.gui.views.cards import (
     render_card_grid,
 )
 from spatialaim.gui.views.controls import Controls
-from spatialaim.gui.views.report import topology_groups
 from spatialaim.gui.widgets.headline_plot import headline_plot
 
 
@@ -96,6 +95,9 @@ def compare_tab(mappers: list[str], args: argparse.Namespace, ctrl: Controls) ->
     _compare_sections(valid, hards, args, k)
 
 
+_ASSORT_COLUMNS = ("spatial_assort_global", "spatial_assort_celltype")
+
+
 def _compare_sections(
     valid: list[str], hards: list[np.ndarray], args: argparse.Namespace, k: int
 ) -> None:
@@ -108,7 +110,7 @@ def _compare_sections(
     cossims: dict[str, dict] = {}
     spot_fracs: dict[str, list[float]] = {}
     for m, hard in zip(valid, hards):
-        cossims[m] = data_access.load_cossim_distributions(roots[m], k)
+        cossims[m] = data_access.load_cossim_boxplots(roots[m], k)
         spot_fracs[m] = [float(np.mean(hard == s)) for s in range(k)]
 
     def _reconstruction() -> None:
@@ -125,22 +127,20 @@ def _compare_sections(
             ),
             key="cmp_sec_frac",
             stem=f"compare_fractions_k{k:03d}",
-            caption="Cell fractions are identical across methods (see a method tab).",
+            caption="Cell fractions are identical across methods (see Explore).",
         )
 
     def _spatial_org() -> None:
-        # The same groups and field order as a method tab's card (_TOPOLOGY_FIELDS),
-        # flattened to one row per field with methods as columns.
+        # The two assortativities at this K, from each method's k_comparison.csv;
+        # one row per metric, methods as columns.
         cols: dict[str, dict] = {}
         for m in valid:
-            topo = (
-                data_access.load_data_json(roots[m], k, "topology_metrics.json") or {}
+            table = data_access.ksweep_table(roots[m])
+            if table is None or not (table["k"] == k).any():
+                continue
+            cols[m] = (
+                table.loc[table["k"] == k, list(_ASSORT_COLUMNS)].iloc[0].to_dict()
             )
-            flat: dict[str, float] = {}
-            for grp, sub in topology_groups(topo).items():
-                for name, val in sub.items():
-                    flat[f"{grp}.{name}"] = val
-            cols[m] = flat
         df = pd.DataFrame(cols)
         if df.empty:
             st.info("No spatial-organisation metrics for these methods.")

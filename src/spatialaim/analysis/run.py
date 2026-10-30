@@ -14,17 +14,17 @@ from .loading import (
 )
 from .reconstruction import analyse_reconstruction
 from .shape_consistency import analyse_shape_consistency
-from .spatial_organization import analyse_spatial_organization
+from .topology import analyse_spatial_organization
 
 logger = logging.getLogger(__name__)
 
 
 def run_analysis(adata_sc: AnnData, adata_st: AnnData, run_dir: Path) -> None:
     """Analyse the mapping saved in ``run_dir`` (one K) and write the metrics
-    to ``run_dir/analysis/data/``: spatial organisation, reconstruction,
+    to ``run_dir/analysis/``: spatial organisation, reconstruction,
     coherence and shape consistency."""
     run_dir = Path(run_dir)
-    data_dir = run_dir / "analysis" / "data"
+    data_dir = run_dir / "analysis"
     data_dir.mkdir(parents=True, exist_ok=True)
 
     start_cluster_to_state = load_start_cluster_to_state(run_dir)

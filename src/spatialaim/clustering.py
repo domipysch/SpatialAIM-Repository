@@ -12,6 +12,7 @@ import scanpy as sc
 from anndata import AnnData
 from spatialaim.adata_schema import (
     LAYER_LOGNORM,
+    OBS_LEIDEN_ALL_GENES,
     OBS_LEIDEN_SHARED_GENES,
     OBS_START_CLUSTER,
     OBSM_LOGNORM_SHARED_GENES,
@@ -36,8 +37,7 @@ def build_neighbor_graph_all_genes(
     n_pca_comps: int = 30,
 ) -> None:
     """PCA and kNN graph of the reference on all genes (lognorm layer), stored
-    in ``adata_sc``. Built in both start-cluster modes: the all-gene UMAP and the
-    modularity metric use it too."""
+    in ``adata_sc``. The all-gene UMAP and the modularity metric use it too."""
     n = min(n_pca_comps, adata_sc.n_obs - 1, adata_sc.n_vars - 1)
     sc.pp.pca(adata_sc, n_comps=n, layer=LAYER_LOGNORM, key_added=OBSM_PCA)
     sc.pp.neighbors(adata_sc, use_rep=OBSM_PCA)
@@ -48,57 +48,64 @@ def run_leiden_clustering_all_genes(
     resolution: float,
     n_pca_comps: int = 30,
 ):
-    """Over-cluster the reference with Leiden on all genes; the clusters become
-    the start clusters (named ``cluster_<i>``)."""
+    """Over-cluster the reference with Leiden on all genes, into
+    ``obs[OBS_LEIDEN_ALL_GENES]``. :func:`set_start_clusters_from_leiden` makes
+    these the start clusters."""
     build_neighbor_graph_all_genes(adata_sc, n_pca_comps=n_pca_comps)
     sc.tl.leiden(
         adata_sc,
         resolution=resolution,
         flavor="igraph",
         n_iterations=2,
-        key_added=OBS_START_CLUSTER,
+        key_added=OBS_LEIDEN_ALL_GENES,
     )
     number_of_clusters = len(
-        np.unique(adata_sc.obs[OBS_START_CLUSTER].astype(int).values)
+        np.unique(adata_sc.obs[OBS_LEIDEN_ALL_GENES].astype(int).values)
     )
     logger.info(
-        "Leiden clustering (resolution=%.2f): %d start clusters",
+        "Leiden clustering (resolution=%.2f): %d clusters",
         resolution,
         number_of_clusters,
     )
     adata_sc.uns[UNS_LEIDEN_RESOLUTION_ALL_GENES] = resolution
+
+
+def set_start_clusters_from_leiden(adata_sc: AnnData) -> list[str]:
+    """Use the all-gene Leiden over-clusters as the start clusters (named
+    ``cluster_<i>``) and return their names."""
+    labels = adata_sc.obs[OBS_LEIDEN_ALL_GENES]
+    number_of_clusters = len(np.unique(labels.astype(int).values))
+    names = [f"cluster_{i}" for i in range(number_of_clusters)]
+
+    adata_sc.obs[OBS_START_CLUSTER] = labels.copy()
     adata_sc.uns[UNS_N_START_CLUSTERS] = number_of_clusters
-    adata_sc.uns[UNS_START_CLUSTER_NAMES] = [
-        f"cluster_{i}" for i in range(number_of_clusters)
-    ]
+    adata_sc.uns[UNS_START_CLUSTER_NAMES] = names
+    logger.info("Start clusters from Leiden: %d cluster(s)", number_of_clusters)
+    return names
 
 
-def drop_unannotated(adata_sc: AnnData, cell_type_key: str) -> AnnData:
-    """``adata_sc`` without the cells that have no label in
-    ``obs[cell_type_key]``. Returns the same object if all cells are labelled,
-    else a copy. Raises ``KeyError`` if the column does not exist."""
+def check_annotation(adata_sc: AnnData, cell_type_key: str) -> None:
+    """Raise unless ``obs[cell_type_key]`` is a valid annotation: the column
+    exists (``KeyError``) and labels every cell (``ValueError``)."""
     if cell_type_key not in adata_sc.obs:
         raise KeyError(
-            f"cell_type_key {cell_type_key!r} not in obs; "
+            f"annotation {cell_type_key!r} not in obs; "
             f"available: {list(adata_sc.obs.columns)}"
         )
-    labelled = adata_sc.obs[cell_type_key].notna().to_numpy()
-    if labelled.all():
-        return adata_sc
-    logger.warning(
-        "Dropping %d of %d cell(s) with no %r label",
-        int((~labelled).sum()),
-        adata_sc.n_obs,
-        cell_type_key,
-    )
-    return adata_sc[labelled].copy()
+    n_unlabelled = int(adata_sc.obs[cell_type_key].isna().sum())
+    if n_unlabelled:
+        raise ValueError(
+            f"annotation {cell_type_key!r} leaves {n_unlabelled} of "
+            f"{adata_sc.n_obs} cell(s) unlabelled; an annotation must label "
+            "every cell"
+        )
 
 
 def set_start_clusters_from_annotation(
     adata_sc: AnnData, cell_type_key: str
 ) -> list[str]:
     """Use the cell types in ``obs[cell_type_key]`` as the start clusters (in
-    sorted category order) and return their names. Run :func:`drop_unannotated`
+    sorted category order) and return their names. Run :func:`check_annotation`
     first."""
     types = pd.Categorical(adata_sc.obs[cell_type_key].astype(str))
     names = [str(c) for c in types.categories]

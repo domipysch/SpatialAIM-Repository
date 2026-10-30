@@ -109,7 +109,8 @@ def render_reconstruction_figure(cossim: dict[str, dict]) -> go.Figure | None:
     similarity for the soft/hard x raw/norm combos. Returns ``None`` if no combos
     are present.
 
-    ``cossim`` maps each label to ``{"per_gene": [...], "per_spot": [...]}``.
+    ``cossim`` maps each label to ``{"per_gene": stats, "per_spot": stats}``
+    (``data_access.load_cossim_boxplots``).
     """
     order = ["soft-raw", "hard-raw", "soft-norm", "hard-norm"]
     labels = [lbl for lbl in order if lbl in cossim]
@@ -124,12 +125,15 @@ def render_reconstruction_figure(cossim: dict[str, dict]) -> go.Figure | None:
     )
     for col, attr in ((1, "per_gene"), (2, "per_spot")):
         for lbl in labels:
+            stats = cossim[lbl][attr]
+            if not stats.get("n"):
+                continue
             fig.add_trace(
                 go.Box(
-                    y=cossim[lbl][attr],
+                    x=[lbl],
+                    **_box_from_stats([stats]),
                     name=lbl,
                     marker_color=_CELL_COLOR if lbl.startswith("soft") else _SPOT_COLOR,
-                    boxpoints=False,
                     showlegend=False,
                 ),
                 row=1,
@@ -139,6 +143,14 @@ def render_reconstruction_figure(cossim: dict[str, dict]) -> go.Figure | None:
     fig.update_yaxes(title_text="cosine similarity", row=1, col=1)
     fig.update_xaxes(tickangle=-30)
     return fig
+
+
+def _box_from_stats(stats: list[dict]) -> dict[str, list[float]]:
+    """``go.Box`` arguments drawing one box per entry of ``stats``
+    (``spatialaim.utils.box_stats``) exactly as Plotly would draw it from the raw
+    values with ``boxpoints=False``."""
+    keys = ("q1", "median", "q3", "lowerfence", "upperfence", "mean")
+    return {key: [s[key] for s in stats] for key in keys}
 
 
 def render_onehot_figure(max_prob: np.ndarray) -> go.Figure:
@@ -235,8 +247,9 @@ def render_compare_reconstruction_figure(cossims: dict[str, dict]) -> go.Figure 
     similarity, with every selected mapper's two hard x raw/norm combos in the
     same axes (grouped by combo, coloured by mapper).
 
-    ``cossims`` maps each mapper to ``{combo: {"per_gene": [...], "per_spot": [...]}}``.
-    Returns ``None`` if no data is present.
+    ``cossims`` maps each mapper to ``{combo: {"per_gene": stats, "per_spot":
+    stats}}`` (``data_access.load_cossim_boxplots``). Returns ``None`` if no data
+    is present.
     """
     order = ["hard-raw", "hard-norm"]
     mappers = [m for m in cossims if cossims[m]]
@@ -252,22 +265,22 @@ def render_compare_reconstruction_figure(cossims: dict[str, dict]) -> go.Figure 
     for col, attr in ((1, "per_gene"), (2, "per_spot")):
         for i, m in enumerate(mappers):
             xs: list[str] = []
-            ys: list[float] = []
+            stats: list[dict] = []
             for combo in order:
-                vals = (cossims[m].get(combo) or {}).get(attr) or []
-                xs += [combo] * len(vals)
-                ys += list(vals)
-            if not ys:
+                s = (cossims[m].get(combo) or {}).get(attr) or {}
+                if s.get("n"):
+                    xs.append(combo)
+                    stats.append(s)
+            if not stats:
                 continue
             fig.add_trace(
                 go.Box(
                     x=xs,
-                    y=ys,
+                    **_box_from_stats(stats),
                     name=m,
                     legendgroup=m,
                     showlegend=(col == 1),
                     marker_color=mapper_color(i),
-                    boxpoints=False,
                 ),
                 row=1,
                 col=col,

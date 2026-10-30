@@ -19,8 +19,7 @@ from spatialaim.gui.render.cell_type import (
     render_cell_type_maps_figure,
     render_gene_distribution_figure,
     render_gene_maps_figure,
-    render_self_enrichment_figure,
-    render_state_coherence_figure,
+    render_state_assortativity_figure,
     render_state_confidence_figure,
 )
 from spatialaim.gui.render.common import SpatialContext
@@ -292,12 +291,11 @@ def _cell_type_general_view(
     state: int,
     spatial: SpatialContext | None,
 ) -> None:
-    """The cell-type modal's "General" view. A per-type bar plot beside a
-    this-type-vs-all-spots violin in each row, every other type greyed out in the
-    bars: the cell-type fractions beside the mapping confidence, and the self
-    neighbourhood-enrichment z-score (spatial organisation) beside the
-    transcriptional coherence. The reference tab has no mapping, so it shows the
-    fractions alone."""
+    """The cell-type modal's "General" view, every other type greyed out in the
+    per-type bar plots: the cell-type fractions beside a this-type-vs-all-spots
+    violin of the mapping confidence, and below them each type's assortativity
+    (spatial organisation). The reference tab
+    has no mapping, so it shows the fractions alone."""
     fractions = render_fractions_figure(
         adata_sc,
         root,
@@ -319,18 +317,11 @@ def _cell_type_general_view(
             width="stretch",
             key="ctdlg_conf",
         )
-    z_col, coh_col = st.columns([3, 2], gap="medium")
-    with z_col, _modal_card("Spatial organization"):
+    with _modal_card("Spatial organization"):
         st.plotly_chart(
-            render_self_enrichment_figure(root, k, highlight=state),
+            render_state_assortativity_figure(root, k, highlight=state),
             width="stretch",
             key="ctdlg_selfz",
-        )
-    with coh_col, _modal_card("Transcriptional coherence"):
-        st.plotly_chart(
-            render_state_coherence_figure(root, k, state, spatial),
-            width="stretch",
-            key="ctdlg_coherence",
         )
 
 

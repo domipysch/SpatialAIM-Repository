@@ -66,10 +66,7 @@ def render_ksweep_criterion_figure(
     """The line card for one criterion: its two curves over K plus their harmonic
     mean (the score the scatter cards below plot against each other).
 
-    A criterion whose two curves live on different scales (the spatial z-scores)
-    is drawn *scaled* -- each curve divided by its own maximum over the sweep --
-    so both curves and their mean share one axis; the hover still reports the raw
-    value. ``index`` picks the criterion's colour pair out of the shared palette.
+    ``index`` picks the criterion's colour pair out of the shared palette.
 
     ``best_k`` marks one K with an amber dashed line and a star on the x-axis (the
     best overall K, so the same K is marked in all three cards). It is drawn as a
@@ -77,31 +74,21 @@ def render_ksweep_criterion_figure(
     the linked-plot component's K bookkeeping.
     """
     k = df["k"].to_numpy()
-    raw_a, raw_b, scaled_a, scaled_b = scores.scaled_curves(df, criterion)
+    curve_a, curve_b = scores.curves(df, criterion)
     palette = (mapper_color(2 * index), mapper_color(2 * index + 1))
 
     fig = go.Figure()
-    for column, label, raw, scaled, color in zip(
-        criterion.columns,
-        criterion.curve_labels,
-        (raw_a, raw_b),
-        (scaled_a, scaled_b),
-        palette,
+    for column, label, values, color in zip(
+        criterion.columns, criterion.curve_labels, (curve_a, curve_b), palette
     ):
         if column not in df.columns:
             continue
-        if criterion.scale_to_max:
-            hover = (
-                f"{label}<br>K %{{customdata[0]:.0f}}<br>"
-                "scaled %{y:.3f}  (raw %{customdata[1]:.2f})<extra></extra>"
-            )
-        else:
-            hover = f"{label}<br>K %{{customdata[0]:.0f}}<br>%{{y:.3f}}<extra></extra>"
+        hover = f"{label}<br>K %{{customdata[0]:.0f}}<br>%{{y:.3f}}<extra></extra>"
         fig.add_trace(
             go.Scatter(
                 x=k,
-                y=scaled,
-                customdata=_k_customdata(k, raw),  # [K, raw value]
+                y=values,
+                customdata=_k_customdata(k),
                 mode="lines+markers",
                 name=label,
                 line=dict(color=color),
@@ -114,7 +101,7 @@ def render_ksweep_criterion_figure(
             )
         )
 
-    combined = scores.harmonic_mean(scaled_a, scaled_b)
+    combined = scores.harmonic_mean(curve_a, curve_b)
     fig.add_trace(
         go.Scatter(
             x=k,
@@ -124,7 +111,7 @@ def render_ksweep_criterion_figure(
             name="harmonic mean",
             line=dict(color=_COMBINED_COLOR, dash="dash", width=2),
             # The mean is undefined wherever either curve is (a K with no
-            # neighbourhood-enrichment z, say); bridge those Ks rather than break
+            # per-cell-type assortativity, say); bridge those Ks rather than break
             # the line, the missing markers already show where they are.
             connectgaps=True,
             marker=dict(

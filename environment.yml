@@ -27,7 +27,7 @@ dependencies:
     # --- core (pip-only) ---
     - igraph                # modularity (metrics.modularity)
     - leidenalg             # Leiden over-clustering
-    - squidpy               # spatial metrics (analysis.spatial_organization)
+    - squidpy               # spatial metrics (analysis.topology)
     # --- GUI only ---
     - streamlit
     - plotly

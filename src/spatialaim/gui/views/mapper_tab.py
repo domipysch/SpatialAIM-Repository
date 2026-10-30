@@ -227,22 +227,30 @@ def _state_markers_card(
 
 
 def _render_progress(mapper: str, run: compute.MapperRun) -> None:
-    """Progress bar for a mapper currently being computed."""
-    done, expected = run.n_done(), run.n_expected()
-    if expected:
-        st.progress(
-            min(done / expected, 1.0), text=f"Computing {mapper}: {done}/{expected} K"
-        )
-    else:
-        # Before the first K folder the sweep is still building the reference
-        # scaffold — which only over-clusters when the start clusters are Leiden's.
-        stage = (
-            "over-clustering…"
-            if run.start_from_annotation is None
-            else f"start clusters from {run.start_from_annotation}…"
-        )
-        st.progress(0.0, text=f"Computing {mapper}: {stage}")
-    st.caption("This tab will show results when the run finishes.")
+    """One progress bar per start of a mapper currently being computed. The
+    starts run one after another, so only the first unfinished one is moving."""
+    current_found = False
+    for p in run.progress():
+        finished = p.expected is not None and p.done >= p.expected
+        if finished:
+            st.progress(1.0, text=f"{p.label}: done ({p.expected} K)")
+        elif not current_found:
+            current_found = True
+            # Before its first K folder the sweep is still preparing the start:
+            # building the reference scaffold (with the Leiden over-clustering) for
+            # the first start, the tree for the others.
+            text = (
+                f"{p.label}: {p.done}/{p.expected} K"
+                if p.expected
+                else f"{p.label}: preparing…"
+            )
+            st.progress(min(p.done / p.expected, 1.0) if p.expected else 0.0, text=text)
+        else:
+            st.progress(0.0, text=f"{p.label}: waiting")
+    st.caption(
+        f"Computing {mapper}. Each starting point shows its results here once its "
+        "sweep has finished."
+    )
 
 
 @st.fragment
@@ -265,11 +273,17 @@ def mapper_tab(
     run = runs.get(mapper)
 
     # In-progress / queued / failed states take precedence over any partial
-    # on-disk output.
-    if run is not None and run.is_running():
+    # on-disk output; a start the running sweep has already finished shows its
+    # results while the next one computes.
+    if run is not None and not run.finished(
+        getattr(args, "start_from_annotation", None)
+    ):
         _render_progress(mapper, run)
         return
-    if mapper in queue:
+    # A queued mapper may already have finished this start (it waits for others).
+    if mapper in queue and not compute.start_complete(
+        args.pair_dir, mapper, getattr(args, "start_from_annotation", None)
+    ):
         st.info(
             f"🕒 Waiting for another method to finish before computing **{mapper}**…"
         )

@@ -287,61 +287,29 @@ def render_state_confidence_figure(
     return base_layout(fig, height=360, margin=dict(l=10, r=10, t=40, b=10))
 
 
-@st.cache_data(show_spinner=False)
-def _coherence_per_spot(root_str: str, k: int) -> np.ndarray:
-    """``data_access.load_coherence_per_spot``, cached per run root and K."""
-    return data_access.load_coherence_per_spot(Path(root_str), k)
-
-
-def render_state_coherence_figure(
-    root: Path, k: int, state: int, spatial: SpatialContext
-) -> go.Figure:
-    """Transcriptional coherence of ``state``: violins of each spot's share of
-    ST expression neighbours mapped to its own state, for the spots assigned to
-    ``state`` vs. all spots, with the state's chance level (its share of spots)
-    as a line."""
-    per_state = (data_access.load_data_json(root, k, "modularity_metrics.json") or {})[
-        "per_state"
-    ]
-    chance = per_state[str(int(state))]["chance"]
-    share = _coherence_per_spot(str(root), int(k))
-    label = state_label(state, names_for(root, k))
-    color = hex_color(state_palette(k).get(int(state)))
-    rng = np.random.default_rng(0)
-    on = np.asarray(spatial.hard) == int(state)
-    fig = make_subplots(rows=1, cols=1)
-    for vals, name, c in ((share[on], label, color), (share, "All cells", "#9e9e9e")):
-        vals = vals[np.isfinite(vals)]
-        add_violin(fig, vals, name, c, rng, col=1, expressing=False)
-    fig.add_hline(
-        y=chance,
-        line_dash="dash",
-        line_color="#555555",
-        annotation_text=f"chance {chance:.2f}",
-        annotation_position="top left",
-    )
-    fig.update_yaxes(
-        title_text="same-type share of expression neighbours", range=[0.0, 1.0]
-    )
-    return base_layout(fig, height=360, margin=dict(l=10, r=10, t=20, b=10))
-
-
-def render_self_enrichment_figure(
+def render_state_assortativity_figure(
     root: Path, k: int, *, highlight: int | None = None
 ) -> go.Figure:
-    """Self neighbourhood-enrichment z-score per computed state (how much more
-    often its spots border each other than under a label shuffle), as bars in
-    the per-state palette; with ``highlight`` every other state is grey. A state
-    without spots, or whose z-score is undefined, has no bar."""
+    """Assortativity per computed state (the share of its spots' neighbours in
+    the same state, chance-corrected: 1 = closed patches, 0 = placed at random),
+    as bars in the per-state palette; with ``highlight`` every other state is
+    grey. A state without spots, or whose value is undefined, has no bar.
+    Outputs written before the assortativity hold the old self z-score
+    instead, which is not shown."""
     topo = data_access.load_data_json(root, k, "topology_metrics.json") or {}
-    per_state = topo["per_state"]
+    per_state = topo.get("per_state", {})
     palette = state_palette(k)
     states = list(range(k))
-    z = [per_state.get(str(s), {}).get("self_zscore", float("nan")) for s in states]
+    values = [per_state.get(str(s), float("nan")) for s in states]
+    # Older outputs nest each value with its purity and share.
+    values = [
+        v.get("spatial_assort", float("nan")) if isinstance(v, dict) else v
+        for v in values
+    ]
     fig = go.Figure(
         go.Bar(
             x=[state_label(s, names_for(root, k)) for s in states],
-            y=[v if np.isfinite(v) else None for v in z],
+            y=[v if np.isfinite(v) else None for v in values],
             marker=dict(
                 color=[
                     (
@@ -352,9 +320,9 @@ def render_self_enrichment_figure(
                     for s in states
                 ]
             ),
-            hovertemplate="%{x}<br>z = %{y:.1f}<extra></extra>",
+            hovertemplate="%{x}<br>assortativity = %{y:.3f}<extra></extra>",
         )
     )
     fig.add_hline(y=0.0, line_color="#555555", line_width=1)
-    card_layout(fig, height=360, yaxis_title="self-enrichment z-score")
+    card_layout(fig, height=360, yaxis_title="assortativity")
     return fig

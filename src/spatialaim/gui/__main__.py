@@ -18,6 +18,10 @@ import subprocess
 import sys
 from importlib.resources import as_file, files
 
+# Streamlit's default primary colour is red, which reads like an error on
+# selections, tags and focused inputs; blue (Streamlit's own info blue) instead.
+PRIMARY_COLOR = "#1c83e1"
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -64,6 +68,8 @@ def launch(server_port: int = 8501) -> int:
             str(server_port),
             "--server.headless",
             "false",
+            "--theme.primaryColor",
+            PRIMARY_COLOR,
         ]
         print("Launching SpatialAIM GUI:", " ".join(cmd), flush=True)
         return subprocess.run(cmd).returncode

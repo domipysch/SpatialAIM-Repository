@@ -20,7 +20,6 @@ class Criterion:
     columns: tuple[str, str]  # the two ``k_comparison.csv`` columns
     curve_labels: tuple[str, str]  # legend labels for those columns
     unit: str  # y-axis title of the line card
-    scale_to_max: bool = False  # divide each curve by its max over K first
     axis_from_zero: bool = False  # start this criterion's scatter axis at 0
 
 
@@ -33,15 +32,15 @@ CRITERIA: tuple[Criterion, ...] = (
         curve_labels=("raw · spot", "raw · gene"),
         unit="cosine similarity",
     ),
-    # The two z-scores differ in scale (tens vs. hundreds), hence scale_to_max.
+    # Both are chance-corrected (0 = random labels, 1 = no edge leaves its
+    # state), so they share one scale across K and starts without rescaling.
     Criterion(
         key="spatial",
         label="Spatial organisation",
         short="Spatial org.",
-        columns=("nhood_mean_self_zscore", "local_purity_zscore"),
-        curve_labels=("nhood enrichment z", "local purity z"),
-        unit="z-score normalized",
-        scale_to_max=True,
+        columns=("spatial_assort_celltype", "spatial_assort_global"),
+        curve_labels=("per cell type (mean)", "global"),
+        unit="assortativity",
     ),
     Criterion(
         key="coherence",

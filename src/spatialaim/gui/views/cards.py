@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Callable, NamedTuple
 
-import pandas as pd
 import streamlit as st
 
 from spatialaim.gui.render.common import figure_to_bytes
@@ -159,22 +158,3 @@ def render_card_grid(cards: list[Card]) -> None:
                         st.session_state["_card_help_text"] = card.help
                         _card_help_dialog()
                 card.body()
-
-
-def render_metrics(container, d: dict, level: int = 0) -> None:
-    """Show a metrics dict: scalars as a two-column table, nested dicts recursively."""
-    scalars = {k: v for k, v in d.items() if not isinstance(v, (dict, list))}
-    if scalars:
-        df = pd.DataFrame(
-            {"metric": list(scalars.keys()), "value": list(scalars.values())}
-        )
-        container.dataframe(df, hide_index=True, width="stretch")
-    for k, v in d.items():
-        if isinstance(v, dict):
-            container.markdown(f"{'#' * min(6, 4 + level)} {k}")
-            render_metrics(container, v, level + 1)
-        elif isinstance(v, list):
-            try:
-                container.dataframe(pd.DataFrame(v), width="stretch")
-            except Exception:  # noqa: BLE001
-                container.write({k: v})

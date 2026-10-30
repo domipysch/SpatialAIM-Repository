@@ -24,38 +24,9 @@ from spatialaim.gui.texts import (
     HELP_FRACTIONS,
     HELP_RECONSTRUCTION,
     HELP_SHAPE,
-    HELP_SPATIAL_ORG,
     confidence_caption,
 )
-from spatialaim.gui.views.cards import Card, plot_card, render_card_grid, render_metrics
-
-# Which fields the Spatial-organisation card shows per metric group, and in what
-# order — the z-score first, since it is the number that is comparable across K;
-# the raw fraction and the null it was scored against come after. Fields left out
-# here (nhood_enrichment's n_states) are not displayed; the analysis still writes
-# them. A group missing from this map is shown whole, in its stored order.
-_TOPOLOGY_FIELDS: dict[str, tuple[str, ...]] = {
-    "local_purity": ("z_score", "p_value", "observed", "null_mean", "null_std"),
-    "nhood_enrichment": ("mean_self_zscore",),
-}
-
-
-def topology_groups(metrics: dict) -> dict[str, dict]:
-    """The nested metric groups of ``topology_metrics.json``, shaped for display.
-
-    Drops any top-level scalar and, for a known group,
-    keeps only the fields in ``_TOPOLOGY_FIELDS`` in that order (skipping
-    absent ones). ``nhood_enrichment`` is null when there are too few mapped
-    states and then drops out. ``per_state`` feeds the cell-type modal, not
-    this card.
-    """
-    out: dict[str, dict] = {}
-    for group, vals in metrics.items():
-        if not isinstance(vals, dict) or group == "per_state":
-            continue
-        order = _TOPOLOGY_FIELDS.get(group)
-        out[group] = vals if order is None else {f: vals[f] for f in order if f in vals}
-    return out
+from spatialaim.gui.views.cards import Card, plot_card, render_card_grid
 
 
 def render_report(mapper: str, root: Path, k: int, args: argparse.Namespace) -> None:
@@ -82,19 +53,6 @@ def render_report(mapper: str, root: Path, k: int, args: argparse.Namespace) -> 
             stem=f"{mapper}_k{k:03d}_confidence",
         )
 
-    def _spatial_org() -> None:
-        metrics = data_access.load_data_json(root, k, "topology_metrics.json")
-        if not metrics:
-            st.info("topology_metrics.json not found for this K.")
-            return
-        # Drop the top-level scalar table; keep the metric groups (local purity,
-        # neighbourhood enrichment), each shaped by _TOPOLOGY_FIELDS.
-        nested = topology_groups(metrics)
-        if nested:
-            render_metrics(st, nested)
-        else:
-            st.info("No spatial-organisation sub-metrics for this K.")
-
     # Assemble the cards. Only include those that have data; each carries the text
     # its ``?`` opens.
     # No Modularity card: the one mapping-dependent value it held now rides in the
@@ -113,7 +71,7 @@ def render_report(mapper: str, root: Path, k: int, args: argparse.Namespace) -> 
                 key=f"frac_{mapper}",
             )
         )
-    cossim = data_access.load_cossim_distributions(root, k)
+    cossim = data_access.load_cossim_boxplots(root, k)
     if cossim:
         cards.append(
             Card(
@@ -133,14 +91,6 @@ def render_report(mapper: str, root: Path, k: int, args: argparse.Namespace) -> 
             _confidence,
             help=confidence_caption(mapper),
             key=f"conf_{mapper}",
-        )
-    )
-    cards.append(
-        Card(
-            "Spatial organisation",
-            _spatial_org,
-            help=HELP_SPATIAL_ORG,
-            key=f"topo_{mapper}",
         )
     )
 

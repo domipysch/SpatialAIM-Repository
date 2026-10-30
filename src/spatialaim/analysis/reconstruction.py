@@ -20,10 +20,19 @@ from spatialaim.adata_schema import (
     UNS_START_CLUSTER_EXPR_SUMS_SHARED_GENES_NORM,
     UNS_START_CLUSTER_SIZES,
 )
-from spatialaim.utils import to_dense
+from spatialaim.utils import box_stats, to_dense
 from ..metrics.cossim import cosine_similarity
 
 logger = logging.getLogger(__name__)
+
+# Per soft/hard x raw/norm combo, the box-plot statistics (spatialaim.utils.box_stats)
+# of the per-gene and per-spot cosine similarities; hard-raw also carries the
+# chance level of its medians under "null".
+COSSIM_METRICS_JSON = "cossim_metrics.json"
+# What older outputs wrote instead: the box-plot statistics alone, and the
+# hard-raw medians with their null in a CSV.
+COSSIM_BOXPLOTS_JSON_LEGACY = "cossim_boxplots.json"
+COSSIM_SUMMARY_CSV_LEGACY = "cossim_summary.csv"
 
 
 N_PERM_RECONSTRUCTION = 20  # label shuffles for the null
@@ -40,10 +49,10 @@ def analyse_reconstruction(
     """Cosine similarity of predicted vs. measured spot expression, per gene
     and per spot, for soft / hard mapping x raw / lognorm expression.
 
-    The prediction is the mapping times the states' mean expression. All four
-    variants go to ``cossim/*.json`` (for the GUI); ``cossim_summary.csv`` holds
-    the hard-raw medians, which the K selection uses, with their chance level
-    from ``n_perm`` label shuffles.
+    The prediction is the mapping times the states' mean expression. All goes
+    to ``cossim_metrics.json``: per variant the box plot statistics (for the
+    GUI), and for hard-raw, whose medians the K selection uses, their chance
+    level from ``n_perm`` label shuffles under ``"null"``.
     """
     P = adata_st.obsm[OBSM_MAPPING_SOFT]
     spot_states_hard = adata_st.obs[OBS_MAPPING_HARD].to_numpy()
@@ -81,8 +90,7 @@ def analyse_reconstruction(
         "soft-norm": (P, centroids_norm, adata_st_norm, False),
         "hard-norm": (spot_states_hard, centroids_norm, adata_st_norm, True),
     }
-    cossim_summary: dict[str, dict] = {}
-    cossim_dir = output_data_dir / "cossim"
+    metrics: dict[str, dict] = {}
     rng = np.random.default_rng(seed)
     for label, (m, centroids, st_ref, is_hard) in combos.items():
         pred = centroids[m] if is_hard else _predict_expression(m, centroids)
@@ -91,22 +99,20 @@ def analyse_reconstruction(
             obs=pd.DataFrame(index=shared_genes),
             var=pd.DataFrame(index=spot_names),
         )
-        result = _compute_and_save_cossim(
-            st_ref, pred_adata, cossim_dir, suffix=f"-{label}"
-        )
+        result = _compute_cossim(st_ref, pred_adata)
+        metrics[label] = {
+            "per_gene": box_stats(list(result.per_gene.values())),
+            "per_spot": box_stats(list(result.per_spot.values())),
+        }
         if label != "hard-raw":
             continue  # only hard-raw is used by the K selection
         null = _cossim_null_medians(
             to_dense(st_ref), centroids, m, n_perm=n_perm, rng=rng
         )
-        cossim_summary[label] = {
-            "median_gene": result.median_gene,
-            "median_spot": result.median_spot,
-            "median_gene_null": null["median_gene"],
-            "median_spot_null": null["median_spot"],
-        }
+        metrics[label]["null"] = null
 
-    pd.DataFrame(cossim_summary).T.to_csv(output_data_dir / "cossim_summary.csv")
+    with open(output_data_dir / COSSIM_METRICS_JSON, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=4)
 
 
 def _predict_expression(mapping, centroids) -> np.ndarray:
@@ -137,25 +143,10 @@ class _CossimResult:
     per_gene: dict[str, float]
     per_spot: dict[str, float]
 
-    @property
-    def median_gene(self) -> float | None:
-        return _median(self.per_gene)
 
-    @property
-    def median_spot(self) -> float | None:
-        return _median(self.per_spot)
-
-
-def _compute_and_save_cossim(
-    st: ad.AnnData,
-    prediction: ad.AnnData,
-    output_folder: Path,
-    suffix: str = "",
-) -> _CossimResult:
+def _compute_cossim(st: ad.AnnData, prediction: ad.AnnData) -> _CossimResult:
     """Cosine similarity between the measured ST data ``st`` (spots x genes)
-    and ``prediction`` (genes x spots), on their shared genes. Writes
-    ``cossim-per-gene{suffix}.json`` and ``cossim-per-spot{suffix}.json`` to
-    ``output_folder``, each ``{"median": ..., "values": {name: cossim}}``."""
+    and ``prediction`` (genes x spots), on their shared genes."""
     measured, predicted = _align(st, prediction.transpose())
     M, P = to_dense(measured), to_dense(predicted)
     result = _CossimResult(
@@ -166,9 +157,6 @@ def _compute_and_save_cossim(
             zip(measured.obs_names, cosine_similarity(M, P, axis=1).tolist())
         ),
     )
-    output_folder.mkdir(parents=True, exist_ok=True)
-    _write_json(output_folder / f"cossim-per-gene{suffix}.json", result.per_gene)
-    _write_json(output_folder / f"cossim-per-spot{suffix}.json", result.per_spot)
     return result
 
 
@@ -221,12 +209,3 @@ def _align(
             f"({measured.n_obs} vs {predicted.n_obs} spots)."
         )
     return measured[:, shared_genes], predicted[measured.obs_names, shared_genes]
-
-
-def _median(values: dict[str, float]) -> float | None:
-    return float(np.median(list(values.values()))) if values else None
-
-
-def _write_json(path: Path, values: dict[str, float]) -> None:
-    with path.open("w", encoding="utf-8") as f:
-        json.dump({"median": _median(values), "values": values}, f, indent=4)

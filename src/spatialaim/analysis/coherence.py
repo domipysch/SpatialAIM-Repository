@@ -1,6 +1,6 @@
 """
 Transcriptional coherence of one K's mapping: modularities of the states on the
-reference and ST expression graphs, and the per-state coherence for the GUI.
+reference and ST expression graphs.
 """
 
 from __future__ import annotations
@@ -8,7 +8,6 @@ import json
 import logging
 from pathlib import Path
 import numpy as np
-import pandas as pd
 import scanpy as sc
 from anndata import AnnData
 from spatialaim.adata_schema import (
@@ -28,12 +27,9 @@ def analyse_modularities(
     adata_st: AnnData,
     output_data_dir: Path,
 ):
-    """Write ``modularity_metrics.json`` and ``coherence_per_spot.csv``.
-
-    The modularity of the states on the reference's all-gene and shared-gene
-    kNN graphs and on the ST expression kNN graph, plus per state the chance
-    level of its coherence (see :func:`_per_state_coherence`).
-    """
+    """Write ``modularity_metrics.json``: the modularity of the states on the
+    reference's all-gene and shared-gene kNN graphs and on the ST expression
+    kNN graph."""
     cell_states = adata_sc.obs[OBS_COMPUTED_STATE].astype(int).to_numpy()
 
     modularity_all = compute_modularity(adata_sc, cell_states)
@@ -41,7 +37,6 @@ def analyse_modularities(
         adata_sc, cell_states, obsp_key=OBSP_CONNECTIVITIES_SHARED_GENES
     )
     modularity_st_expression = _spatial_expression_modularity(adata_st)
-    per_state = _per_state_coherence(adata_st, cell_states, output_data_dir)
 
     with open(output_data_dir / "modularity_metrics.json", "w") as f:
         json.dump(
@@ -49,7 +44,6 @@ def analyse_modularities(
                 "modularity_all": float(modularity_all),
                 "modularity_shared": float(modularity_shared),
                 "modularity_st_expression": float(modularity_st_expression),
-                "per_state": per_state,
             },
             f,
             indent=4,
@@ -78,37 +72,3 @@ def _spatial_expression_modularity(adata_st: AnnData) -> float:
     )
     hard_labels = adata_st.obs[OBS_MAPPING_HARD].astype(int).to_numpy()
     return compute_modularity(graph, hard_labels)
-
-
-def _per_state_coherence(
-    adata_st: AnnData, cell_states: np.ndarray, output_data_dir: Path
-) -> dict:
-    """Per spot, the share of its ST-expression neighbours mapped to its own
-    state (written to ``coherence_per_spot.csv``). Returns per state its chance
-    level, the state's share of spots; every reference state gets an entry,
-    also one without spots."""
-    hard = adata_st.obs[OBS_MAPPING_HARD].astype(int).to_numpy()
-    share = _same_label_share(hard, adata_st.obsp[OBSP_ST_EXPR_CONNECTIVITIES])
-    pd.DataFrame({"id": adata_st.obs_names, "same_label_share": share}).to_csv(
-        output_data_dir / "coherence_per_spot.csv", index=False
-    )
-    return {
-        str(int(s)): {"chance": float(np.mean(hard == s))}
-        for s in np.union1d(np.unique(hard), np.unique(cell_states))
-    }
-
-
-def _same_label_share(labels: np.ndarray, connectivities) -> np.ndarray:
-    """Per node, the share of its graph neighbours with its own label (NaN
-    without neighbours). Neighbours are the stored entries of its row, weights
-    ignored, itself excluded."""
-    A = connectivities.tocoo()
-    off = A.row != A.col
-    row, col = A.row[off], A.col[off]
-    n = A.shape[0]
-    same = np.bincount(
-        row, weights=(labels[row] == labels[col]).astype(np.float64), minlength=n
-    ).astype(np.int64)
-    degree = np.bincount(row, minlength=n).astype(np.int64)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(degree > 0, same / degree, np.nan)

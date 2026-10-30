@@ -1,25 +1,25 @@
 """
 User-assigned names for the computed cell types, one set per K.
 
-A name belongs to the ``(output_dir, K)`` pair, not to a mapper: every mapper
-under one output dir cuts the same reference tree, so "cell type 3 at K = 7" is
-the same population whichever mapper placed it there. The names live in
-``<output_dir>/cell_type_names.json``::
+A name belongs to the ``(start folder, K)`` pair, not to a mapper: every mapper
+under one start folder cuts the same reference tree, so "cell type 3 at K = 7" is
+the same population whichever mapper placed it there. Different starts build
+different trees, so each start folder keeps its own names, in
+``<start folder>/cell_type_names.json``::
 
     {"7": {"0": "Astrocytes", "3": "L2/3 IT"}, "12": {...}}
 
 Only the names actually set are stored; ``label`` falls back to ``Cell type <n>``
-for every other state, so a partly-named K is the normal case. A run started
-from an annotation (``--start_from_annotation``) is the exception at K = T (T =
-the number of annotated types): there the tree cut is the identity, so every
-state *is* one annotated type and defaults to that type's name
-(``annotation_names``); a name set by hand still wins.
+for every other state, so a partly-named K is the normal case. An annotation
+start (``--annotation``) is the exception at K = T (T = the number of annotated
+types): there the tree cut is the identity, so every state *is* one annotated
+type and defaults to that type's name (``annotation_names``); a name set by hand
+still wins.
 
 This is the GUI's only write path onto disk. Nothing in the sweep or the analysis
 reads the file -- losing it costs the labels and nothing else. Because the key is
-K alone, names do go stale if the same output dir is later rebuilt with different
-start clusters or linkage (which the tool asks you to keep in separate output
-dirs anyway).
+K alone, names do go stale if the same output dir is later rebuilt with a
+different linkage (which the GUI prevents by locking it per output folder).
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from spatialaim.io import START_CLUSTER_TO_STATE_FILENAME, START_CLUSTERING_FILENAME
+from spatialaim.io import START_CLUSTER_TO_STATE_FILENAME
 
 from . import data_access
 
@@ -64,7 +64,7 @@ def load_all(output_dir: Path) -> dict[str, dict[str, str]]:
 
 
 def annotation_names(output_dir: Path, k: int) -> dict[int, str]:
-    """``{state: annotated type}`` when this output dir's runs start from an
+    """``{state: annotated type}`` when this start folder's runs start from an
     annotation and ``k`` is T, the number of annotated types -- the level where
     the tree cut is the identity, so each state is exactly one annotated type.
     Empty for every other K, for Leiden starts, and when no run root has the
@@ -72,9 +72,9 @@ def annotation_names(output_dir: Path, k: int) -> dict[int, str]:
     if data_access.start_from_annotation_from_config(output_dir) is None:
         return {}
     for root in sorted(Path(output_dir).glob("*/")):
-        clustering = root / START_CLUSTERING_FILENAME
+        clustering = data_access.start_clustering_path(root)
         cut = data_access.k_dir(root, k) / START_CLUSTER_TO_STATE_FILENAME
-        if clustering.exists() and cut.exists():
+        if clustering is not None and cut.exists():
             # mtimes in the key: a rerun into the same dir invalidates the cache.
             return dict(
                 _annotation_names(
@@ -92,7 +92,7 @@ def _annotation_names(
     clustering: str, cut: str, _m1: float, _m2: float
 ) -> tuple[tuple[int, str], ...]:
     """``annotation_names`` for one run root's files (cached per file version)."""
-    names = data_access.load_start_cluster_names(Path(clustering).parent)
+    names = data_access.load_start_cluster_names(Path(cut).parent.parent)
     states = pd.read_csv(cut)["state"].to_numpy(dtype=int)
     if (
         names is None

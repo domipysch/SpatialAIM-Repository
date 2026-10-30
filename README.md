@@ -22,8 +22,8 @@ The spot→state step is **modular**. In principle, any scRNA to ST alignment to
 We implement two baseline mappers (`nearest_centroid`, `wann`) and three reference mappers (`tangram`,  `tacco`, `dot`).
 You are invited to add and try out your mapper of choice!
 
-If you want to replace the Leiden overclustering from Step 1 with your own annotations,
-`--start_from_annotation` takes an existing annotation's `L` cell types as the start clusters instead.
+If you also want to start Step 1 from your own annotations,
+`--annotation` runs the sweep a second time (once per annotation) with an existing annotation's `L` cell types as the start clusters.
 
 ![aim_figure](./docs/figure_2_1.png)
 
@@ -139,8 +139,10 @@ spatialaim gui [--server_port 8501]
 
 Open the printed URL (default http://localhost:8501), set the inputs, pick one or multiple mapper(s), and click **Run**.
 As soon as both `.h5ad` paths are set, the GUI runs the same checks as [`spatialaim validate`](#validate-a-dataset-pair-spatialaim-validate) on that pair: a clean pair is confirmed with a tick in the sidebar, any error or warning is shown in a dialog you can close to continue anyway.
-The GUI writes each mapper's sweep to  `<output_dir>/<mapper>/`. The results using each mapper are visualized in different tabs. When having run multiple mappers, also a "Compare" tab appears.
-An optional **Segmentation path** (the ST slice's cell segmentation mask, see the sidebar's *Info*) is validated with the pair and passed to the runs; their mapper tabs then get a "Shape features" card (shape consistency and the cells' area / eccentricity / solidity per cell type), and the cell-type modal a "Shape features" view. Without it the GUI is unchanged.
+The GUI always runs from the Leiden over-clustering; pick annotations under *Also start from annotations* to additionally start from them (the same as `--annotation`).
+It writes the same layout as the CLI, `<output_dir>/<start>/<mapper>/`. The results are pages in a top navigation: **Overview** (a table of every starting point × mapper at its best overall K, sorted by the overall score; a selected row opens it in Explore), **Explore** (pick starting clusters, method and K in one control bar; switching start or method lands on that combination's best K), **Compare** (several methods of one starting point side by side, once two have finished) and **Single-cell reference**.
+Once an output folder holds results, its linkage is fixed. Mappers and annotations can still be added: the next *Run* computes every missing starting point × mapper combination. Output folders written by earlier versions (`<output_dir>/<mapper>/`) can still be opened and viewed.
+An optional **Segmentation path** (the ST slice's cell segmentation mask, see the sidebar's *Info*) is validated with the pair and passed to the runs; their Explore views then get a "Shape features" card (shape consistency and the cells' area / eccentricity / solidity per cell type), and the cell-type modal a "Shape features" view. Without it the GUI is unchanged.
 
 ### Run via CLI (`spatialaim run`)
 
@@ -156,10 +158,10 @@ The linkage of the agglomeration tree over the start clusters is chosen with `--
 - **`average`** (default): UPGMA — average pairwise distance; no size term, tends to peel small tight groups off a growing dominant state.
 - **`ward`**: Ward's criterion (R's `ward.D`); carries a size term and tends to produce balanced states.
 
-The **start clusters** the tree is built over come from the Leiden over-clustering by default.
-Pass `--start_from_annotation <obs_column>` to use a pre-existing annotation instead: its cell types become the start clusters, no over-clustering is computed at all,
-and `K` sweeps from the number of annotated types down (cells with no label are dropped).
-Give such runs their own `--output_dir`: a run root is named after the mapper alone, so the two modes would otherwise overwrite each other.
+The **start clusters** the tree is built over come from the Leiden over-clustering.
+Pass `--annotation <obs_column> [<obs_column> ...]` to additionally start from pre-existing annotations: the sweep then runs once from the Leiden clusters
+and once per annotation, whose cell types become the start clusters (`K` sweeps from the number of annotated types down).
+Every annotation must label every cell; a missing column or an unlabelled cell is an error (in batch mode, that pair fails).
 
 **Single pair**
 
@@ -170,7 +172,7 @@ spatialaim run --scdata path/to/sc.h5ad \
 		[--segmentation path/to/mask.tif] \
 		[--mapping nearest_centroid|wann|tangram|tacco|dot] \
 		[--linkage_method average|ward] \
-		[--start_from_annotation <obs_column>] \
+		[--annotation <obs_column> ...] \
 		[--leiden_resolution 3.0] \
 		[--k_min 1] [--k_max <L>] [--k_step 1] \
 		[--logging verbose]
@@ -187,7 +189,7 @@ spatialaim run --pairs_csv path/to/pairs.csv \
 		--output_dir path/to/out_dir \
 		[--mapping nearest_centroid|wann|tangram|tacco|dot] \
 		[--linkage_method average|ward] \
-		[--start_from_annotation <obs_column>] \
+		[--annotation <obs_column> ...] \
 		[--leiden_resolution 3.0] \
 		[--k_min 1] [--k_max <L>] [--k_step 1] \
 		[--logging verbose]
@@ -199,17 +201,18 @@ Each pair is written to `<out_dir>/<PairID>_<scName>__<stName>/`.
 
 ```
 <out_dir>/
-├── reference_scaffold.h5ad        # cached reference preparation, shared by all mappers
-└── <mapping>/                     # one folder per mapper, e.g. nearest_centroid/
-    ├── config.yaml                # the run's settings
-    ├── start_clustering.h5ad      # each reference cell's start cluster
-    ├── cell_shape_features.csv    # only with a segmentation mask: area, eccentricity, solidity per cell
-    ├── k_<kkk>/                   # one folder per K
-    │   ├── spot_to_state_mapping_soft.h5ad   # the mapping P (spots × K), plus confidence if the mapper has one
-    │   ├── start_cluster_to_state.csv        # which state each start cluster belongs to
-    │   └── analysis/data/                    # the metrics for this K (the GUI plots them)
-    ├── k_comparison.csv           # one row per K: all metrics and the K-selection scores
-    └── k_selection.json           # the suggested K, overall and per criterion
+├── reference_scaffold.h5ad        # cached reference preparation, shared by all starts and mappers
+├── cell_shape_features.csv        # only with a segmentation mask: area, eccentricity, solidity per cell
+└── <start>/                       # leiden/, plus annotation_<obs_column>/ per --annotation
+    ├── start_clustering.h5ad      # each reference cell's start cluster (shared by the mappers)
+    └── <mapping>/                 # one folder per mapper, e.g. nearest_centroid/
+        ├── config.yaml            # the run's settings (start_from_annotation: this start)
+        ├── k_<kkk>/               # one folder per K
+        │   ├── spot_to_state_mapping_soft.h5ad   # the mapping P (spots × K), plus confidence if the mapper has one
+        │   ├── start_cluster_to_state.csv        # which state each start cluster belongs to
+        │   └── analysis/                         # the metrics for this K (the GUI plots them)
+        ├── k_comparison.csv       # one row per K: all metrics and the K-selection scores
+        └── k_selection.json       # the suggested K, overall and per criterion
 ```
 
 **Sample-dataset example:**
@@ -225,7 +228,7 @@ spatialaim run \
 
 ### Annotation-based baseline
 
-There is no separate command for it: `spatialaim run --start_from_annotation <obs_column>` covers it.
+There is no separate command for it: `spatialaim run --annotation <obs_column>` covers it.
 The annotated types become the start clusters, and the sweep's **`K` = number-of-types** level is the baseline.
 
 ## For developers
@@ -287,7 +290,7 @@ ReferenceAligner("<name>", "<name>_env", "spatialaim.reference_aligners.run_<nam
 It is then selectable everywhere automatically:
 
 - `spatialaim gui` (it will be selectable in the sidebar)
-- `spatialaim run --mapping <name>` (as an SpatialAIM reference mapper, one alignment per `K`) — including `--start_from_annotation`, where it maps onto a pre-existing annotation
+- `spatialaim run --mapping <name>` (as an SpatialAIM reference mapper, one alignment per `K`) — including the `--annotation` starts, where it maps onto a pre-existing annotation
 
 **4. Create PR**
 

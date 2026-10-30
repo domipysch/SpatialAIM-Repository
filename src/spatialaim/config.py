@@ -3,7 +3,7 @@ Run configuration for SpatialAIM
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from spatialaim.reference_aligners.registry import REFERENCE_ALIGNERS
 from .mapping import (
     SpotStateMapper,
@@ -26,10 +26,12 @@ class SpatialAIMConfig:
     leiden_resolution: float = 3.0
     # Agglomeration-tree linkage: "average" (UPGMA) or "ward" (balanced states).
     linkage_method: str = LINKAGE_METHODS[0]
-    # Start clusters (what the agglomeration tree is built over): None = Leiden
-    # over-clustering; an obs column name = use that annotation instead, in which
-    # case no all-gene Leiden is computed and K sweeps from the number of types.
-    start_from_annotation: str | None = None
+    # Start clusters (what the agglomeration tree is built over): the sweep starts
+    # from the Leiden over-clustering (unless leiden_start is off; the GUI turns it
+    # off once that start is done), and additionally from each of these obs
+    # columns (annotations; each must label every cell).
+    leiden_start: bool = True
+    annotations: list[str] = field(default_factory=list)
     # K sweep range
     k_min: int | None = None
     k_max: int | None = None

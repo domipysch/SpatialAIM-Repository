@@ -1,6 +1,6 @@
 """
 Figure production for the GUI: every figure is an interactive Plotly object
-built from the metrics on disk (each K's ``analysis/data``) and, for the UMAP,
+built from the metrics on disk (each K's ``analysis/``) and, for the UMAP,
 marker and fraction views, the reference scaffold.
 
 - ``common``     palettes, shared layout, labels, axes, static export

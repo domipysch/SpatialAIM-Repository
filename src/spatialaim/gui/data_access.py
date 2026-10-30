@@ -2,10 +2,17 @@
 Pure on-disk readers for SpatialAIM sweep outputs.
 
 Everything here is cheap and side-effect-free (reads only); ``loaders`` wraps
-the expensive ones with ``st.cache_data``. A "run root" is the folder a
-single mapper's sweep wrote into (``<output_dir>/<mapper>/``): it holds
-``config.yaml``, ``start_clustering.h5ad``, ``k_comparison.{csv,png}`` and
-one ``k_<kkk>/`` folder per swept K.
+the expensive ones with ``st.cache_data``.
+
+A sweep writes one *pair output* (the sidebar's output directory) holding one
+*start folder* per start clusters (``leiden/``, ``annotation_<obs column>/``, see
+``list_starts``). A start folder holds one *run root* per mapper
+(``<start folder>/<mapper>/``) with ``config.yaml``, ``k_comparison.csv`` and
+one ``k_<kkk>/`` folder per swept K, plus the ``start_clustering.h5ad`` its
+mappers share. The result tabs show one start folder at a time, so their
+``output_dir`` is a start folder. Outputs written before the start folders
+existed hold the run roots directly in the pair output, which then serves as
+its own single start folder.
 """
 
 from __future__ import annotations
@@ -13,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import NamedTuple
 
 import anndata as ad
 import numpy as np
@@ -23,15 +31,84 @@ import yaml
 
 # MAPPING_CHOICES is the authoritative list of valid mapper names.
 from spatialaim import MAPPING_CHOICES
+from spatialaim.analysis.reconstruction import (
+    COSSIM_BOXPLOTS_JSON_LEGACY,
+    COSSIM_METRICS_JSON,
+)
 from spatialaim.analysis.shape_consistency import SHAPE_FEATURES_CSV
-from spatialaim.io import START_CLUSTERING_FILENAME
+from spatialaim.io import (
+    ANNOTATION_START_PREFIX,
+    LEIDEN_START_FOLDER,
+    START_CLUSTERING_FILENAME,
+    start_folder_name,
+)
+from spatialaim.utils import box_stats
 
 _K_DIR_RE = re.compile(r"^k_(\d{3})$")
 
 
 def run_root(output_dir: Path, mapper: str) -> Path:
-    """The run-root folder for one mapper under the shared output dir."""
+    """The run-root folder for one mapper under a start folder."""
     return Path(output_dir) / mapper
+
+
+class Start(NamedTuple):
+    """One start clusters' results in a pair output: its folder and the
+    annotation it starts from (``None`` = the Leiden over-clustering)."""
+
+    folder: Path
+    annotation: str | None
+
+    @property
+    def label(self) -> str:
+        return start_label(self.annotation)
+
+
+def start_label(annotation: str | None) -> str:
+    """Display name of a start: ``Leiden`` or the annotation's obs column."""
+    return "Leiden" if annotation is None else str(annotation)
+
+
+def is_legacy_layout(pair_dir: Path) -> bool:
+    """Whether ``pair_dir`` holds run roots directly (an output written before the
+    start folders existed)."""
+    return bool(list_mappers(pair_dir))
+
+
+def list_starts(pair_dir: Path, planned: list[str | None] | None = None) -> list[Start]:
+    """The starts of a pair output, the Leiden start first, then the annotations
+    in name order.
+
+    A start counts once its folder holds a run root; ``planned`` adds the starts a
+    queued or running sweep is about to write (``None`` = Leiden), so their tabs can
+    show progress before the folder exists. A legacy output is its own single
+    start, read from its configs.
+    """
+    pair_dir = Path(pair_dir)
+    if is_legacy_layout(pair_dir):
+        return [Start(pair_dir, start_from_annotation_from_config(pair_dir))]
+
+    found: dict[Path, str | None] = {}
+    if pair_dir.is_dir():
+        for folder in sorted(p for p in pair_dir.iterdir() if p.is_dir()):
+            if folder.name != LEIDEN_START_FOLDER and not folder.name.startswith(
+                ANNOTATION_START_PREFIX
+            ):
+                continue
+            if not list_mappers(folder):
+                continue
+            found[folder] = start_from_annotation_from_config(folder)
+    for annotation in planned or []:
+        found.setdefault(pair_dir / start_folder_name(annotation), annotation)
+    starts = [Start(folder, annotation) for folder, annotation in found.items()]
+    return sorted(starts, key=lambda s: (s.annotation is not None, s.label.lower()))
+
+
+def list_pair_mappers(pair_dir: Path) -> list[str]:
+    """Mappers with a run root in any start of a pair output (MAPPING_CHOICES
+    order)."""
+    present = {m for s in list_starts(pair_dir) for m in list_mappers(s.folder)}
+    return [m for m in MAPPING_CHOICES if m in present]
 
 
 def is_run_root(path: Path) -> bool:
@@ -69,7 +146,11 @@ def list_ks(root: Path) -> list[int]:
 
 
 def data_dir(root: Path, k: int) -> Path:
-    return k_dir(root, k) / "analysis" / "data"
+    """One K's analysis metrics: ``k_<kkk>/analysis/``, or ``analysis/data/``
+    in outputs written before that subfolder was dropped."""
+    new = k_dir(root, k) / "analysis"
+    old = new / "data"
+    return old if old.is_dir() else new
 
 
 def load_soft(root: Path, k: int) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
@@ -99,33 +180,43 @@ def load_data_json(root: Path, k: int, name: str) -> dict | None:
         return json.load(f)
 
 
-def load_coherence_per_spot(root: Path, k: int) -> np.ndarray:
-    """Per-spot transcriptional coherence for one K: the share of each spot's ST
-    expression neighbours mapped to its own state (``coherence_per_spot.csv``,
-    in the spot order of the mapping)."""
-    df = pd.read_csv(data_dir(root, k) / "coherence_per_spot.csv")
-    return df["same_label_share"].to_numpy(dtype=np.float64)
+def shape_features_path(root: Path) -> Path | None:
+    """The ST slice's ``cell_shape_features.csv`` for a run root: in the pair
+    output, two levels up, or in the run root itself in older outputs. ``None``
+    when the sweep ran without a segmentation mask."""
+    for folder in (Path(root).parent.parent, Path(root)):
+        path = folder / SHAPE_FEATURES_CSV
+        if path.exists():
+            return path
+    return None
 
 
 def load_shape_features(root: Path) -> pd.DataFrame | None:
-    """Per-cell shape features of the ST slice (``cell_shape_features.csv`` at the run
-    root, in spot order: ``area_px``, ``area_um2``, ``eccentricity``,
-    ``solidity``), or ``None`` when the sweep ran without a segmentation mask."""
-    path = Path(root) / SHAPE_FEATURES_CSV
-    if not path.exists():
-        return None
-    return pd.read_csv(path, index_col=0)
+    """Per-cell shape features of the ST slice (``shape_features_path``; in spot
+    order: ``area_px``, ``area_um2``, ``eccentricity``, ``solidity``), or ``None``
+    when the sweep ran without a segmentation mask."""
+    path = shape_features_path(root)
+    return None if path is None else pd.read_csv(path, index_col=0)
 
 
-def load_cossim_distributions(root: Path, k: int) -> dict[str, dict[str, list]]:
-    """Per-combo reconstruction cosine-similarity value lists for one K.
+def load_cossim_boxplots(root: Path, k: int) -> dict[str, dict[str, dict]]:
+    """Per-combo box-plot statistics of the reconstruction cosine similarity
+    for one K: ``{label: {"per_gene": stats, "per_spot": stats}}`` for the
+    soft/hard x raw/norm combos (``stats`` as ``spatialaim.utils.box_stats``;
+    empty dict if none). Hard-raw also carries its ``"null"`` medians.
 
-    Returns ``{label: {"per_gene": [...], "per_spot": [...]}}`` for the four
-    soft/hard x raw/norm combos found under ``analysis/data/cossim`` (empty dict
-    if none). Each on-disk JSON stores ``{"values": {name: cossim}}``.
+    Read from ``cossim_metrics.json`` (``cossim_boxplots.json`` in older
+    outputs); the oldest stored every value under ``cossim/``, and the
+    statistics are computed from those instead.
     """
+    for name in (COSSIM_METRICS_JSON, COSSIM_BOXPLOTS_JSON_LEGACY):
+        path = data_dir(root, k) / name
+        if path.exists():
+            with open(path) as f:
+                return json.load(f)
+
     cdir = data_dir(root, k) / "cossim"
-    out: dict[str, dict[str, list]] = {}
+    out: dict[str, dict[str, dict]] = {}
     for label in ("soft-raw", "hard-raw", "soft-norm", "hard-norm"):
         gene_path = cdir / f"cossim-per-gene-{label}.json"
         spot_path = cdir / f"cossim-per-spot-{label}.json"
@@ -135,7 +226,7 @@ def load_cossim_distributions(root: Path, k: int) -> dict[str, dict[str, list]]:
             per_gene = list(json.load(f)["values"].values())
         with open(spot_path) as f:
             per_spot = list(json.load(f)["values"].values())
-        out[label] = {"per_gene": per_gene, "per_spot": per_spot}
+        out[label] = {"per_gene": box_stats(per_gene), "per_spot": box_stats(per_spot)}
     return out
 
 
@@ -146,11 +237,17 @@ def ksweep_table(root: Path) -> pd.DataFrame | None:
 
 
 def list_obs_columns(sc_path: Path) -> list[str]:
-    """Column names of an h5ad's ``obs``, read in backed mode -- cheap even for a
-    multi-GB reference. Used to offer annotation columns as start clusters."""
+    """The ``obs`` columns of an h5ad that can serve as start clusters: every
+    column that labels each cell and is not a float (a continuous value, not a
+    cell type). Read in backed mode -- cheap even for a multi-GB reference."""
     adata = ad.read_h5ad(sc_path, backed="r")
     try:
-        return [str(c) for c in adata.obs.columns]
+        obs = adata.obs
+        return [
+            str(c)
+            for c in obs.columns
+            if not pd.api.types.is_float_dtype(obs[c]) and not obs[c].isna().any()
+        ]
     finally:
         if adata.isbacked:
             adata.file.close()
@@ -179,9 +276,14 @@ def load_spatial_lognorm(st_path: Path, genes: list[str]):
 
 
 def start_clustering_path(root: Path) -> Path | None:
-    """The run root's ``start_clustering.h5ad``, or ``None`` if it does not exist."""
-    path = Path(root) / START_CLUSTERING_FILENAME
-    return path if path.exists() else None
+    """The ``start_clustering.h5ad`` of the run root's start (in the start folder,
+    one level up, or in the run root itself in older outputs), or ``None`` if
+    there is none."""
+    for folder in (Path(root).parent, Path(root)):
+        path = folder / START_CLUSTERING_FILENAME
+        if path.exists():
+            return path
+    return None
 
 
 def load_start_cluster_labels(root: Path) -> np.ndarray | None:

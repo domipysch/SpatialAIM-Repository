@@ -1,6 +1,7 @@
 """
-The sidebar: data paths (step 1), the start clusters, linkage and mapping methods
-to run (step 2), and the footer with the version and the feedback link.
+The sidebar: data paths (step 1), the annotations to start from besides the
+Leiden over-clustering, linkage and mapping methods to run (step 2), and the
+footer with the version and the feedback link.
 """
 
 from __future__ import annotations
@@ -33,9 +34,21 @@ _DEFAULT_K_MIN: int = 1
 _DEFAULT_K_MAX: int | None = None
 _DEFAULT_K_STEP = 1
 
-# Sidebar label for the default start clusters (no annotation column chosen).
-_LEIDEN_START_LABEL = "No (default, use Leiden over-clustering)"
-_NO_ANNOTATION_LABEL = "No annotations found in scRNA data"
+_ANNOTATIONS_LABEL = "Also start from annotations"
+_LEIDEN_ONLY = "Start from Leiden over-clustering only"
+_ANNOTATIONS_HELP = (
+    "SpatialAIM always starts from a Leiden over-clustering of the reference. Each "
+    "annotation picked here adds a sweep that starts from its cell types instead; "
+    "the results view switches between these starting points. Offered are the "
+    "scRNA obs columns that label every cell. Annotations can be added after a "
+    "run: the next run computes every selected method on the starting points it "
+    "is missing. Starting points with results stay selected."
+)
+
+_LEGACY_NOTICE = (
+    "This output folder holds results from an earlier SpatialAIM version. They can "
+    "be viewed, but new runs need a new output folder."
+)
 
 # Display-only labels; the raw method names go into the run config.
 _LINKAGE_LABELS = {
@@ -43,10 +56,15 @@ _LINKAGE_LABELS = {
     "ward": "ward - more balanced cell types",
 }
 
+# The sidebar's keyed inputs keep their values for the whole session.
+# st.switch_page (the Overview's Open button) reruns without the frontend's
+# widget states, and Streamlit then drops every widget's value that is not
+# persisted -- the sidebar would come back empty.
+_PERSIST = "session"
+
 _LOCKED_HELP = (
-    "Fixed by the runs already in this output folder: the cached reference scaffold "
-    "and every persisted tree cut are tied to it. Point the output directory "
-    "somewhere new to choose again."
+    "Fixed by the runs already in this output folder: every persisted tree cut is "
+    "tied to it. Point the output directory somewhere new to choose again."
 )
 
 
@@ -113,7 +131,7 @@ def _clear_session() -> None:
     st.session_state["cfg_seg"] = ""
     st.session_state["cfg_out"] = ""
     st.session_state["cfg_linkage"] = LINKAGE_METHODS[0]
-    st.session_state["cfg_start"] = _LEIDEN_START_LABEL
+    st.session_state["cfg_annotations"] = []
     st.session_state["runs"] = {}
     st.session_state["queue"] = []
     st.session_state.pop("_run_requested", None)
@@ -121,79 +139,87 @@ def _clear_session() -> None:
     st.session_state.pop("_validation_seen", None)
     st.session_state.pop("_validation_reopen", None)
     st.session_state.pop("_show_data_help", None)
-    # Drop transient widget state: the method checkboxes, shared controls, and
-    # every per-tab / best-K control.
+    # Drop transient widget state: the method checkboxes, the result pages'
+    # controls and remembered view (start, method, K), and every per-view /
+    # best-K control.
     for k in list(st.session_state.keys()):
-        if k.startswith(("add_", "done_", "tab_", "cmp", "ctrl_", "bestk_", "ks_")):
+        if k.startswith(
+            (
+                "add_",
+                "done_",
+                "tab_",
+                "cmp",
+                "ctrl_",
+                "bestk_",
+                "ks_",
+                "view_",
+                "_view_",
+                "ov_",
+            )
+        ):
             del st.session_state[k]
 
 
-def _run_lock(out_str: str) -> dict | None:
-    """The scaffold-defining settings an output folder's existing runs pin down, or
-    ``None`` when it holds no runs yet.
+def _run_lock(out_path: Path) -> dict | None:
+    """The settings an output folder's existing runs pin down, or ``None`` when it
+    holds no runs yet: its starts' annotations, the linkage, and whether it is a
+    folder from an earlier version (``legacy``, which takes no new runs).
 
-    Read back from any mapper's ``config.yaml``; a value it does not record
+    Read back from the mappers' ``config.yaml``; a linkage no config records
     comes back as ``None`` and stays editable.
     """
-    out_path = Path(out_str.strip()) if out_str.strip() else None
-    if out_path is None or not data_access.list_mappers(out_path):
+    starts = data_access.list_starts(out_path)
+    if not starts:
         return None
+    linkages = (data_access.linkage_method_from_config(s.folder) for s in starts)
     return {
-        "start_from_annotation": data_access.start_from_annotation_from_config(
-            out_path
-        ),
-        "linkage_method": data_access.linkage_method_from_config(out_path),
+        "legacy": data_access.is_legacy_layout(out_path),
+        "annotations": [s.annotation for s in starts if s.annotation is not None],
+        "linkage_method": next((m for m in linkages if m), None),
     }
 
 
-def _start_cluster_row(sc_str: str, lock: dict | None) -> str | None:
-    """Sidebar picker for the start clusters; returns the annotation column or
-    ``None`` for the Leiden over-clustering.
+def _annotation_row(sc_str: str, lock: dict | None) -> list[str]:
+    """Sidebar picker for the annotations to start from besides the Leiden
+    over-clustering; returns the chosen obs columns. With nothing picked it reads
+    "Start from Leiden over-clustering only".
 
-    Once an output dir holds a run, its recorded choice is shown as a disabled
-    dropdown rather than letting the two modes mix in one folder.
+    Annotations can be added at any time, like mappers: the next run sweeps every
+    mapper of the folder on the starts it lacks. The annotations the folder
+    already holds runs for stay selected (removing one puts it straight back),
+    since their results stay on disk either way.
     """
-    help_text = (
-        "The agglomeration tree is built over Leiden over-clusters by default; an "
-        "scRNA obs column uses that annotation's cell types instead."
-    )
-
-    def _fmt(option: str) -> str:
-        return option if option == _LEIDEN_START_LABEL else f".obs key {option}"
-
-    if lock is not None:
-        recorded = lock["start_from_annotation"]
-        st.sidebar.selectbox(
-            "Override starting clusters",
-            [recorded or _LEIDEN_START_LABEL],
-            format_func=_fmt,
-            disabled=True,
-            help=_LOCKED_HELP,
-        )
-        return recorded
-
+    recorded = list(lock["annotations"]) if lock is not None else []
     sc_path = Path(sc_str.strip()) if sc_str.strip() else None
-    annotations = (
+    available = (
         obs_columns(str(sc_path)) if sc_path is not None and sc_path.is_file() else []
     )
+    annotations = [*recorded, *(a for a in available if a not in recorded)]
     if not annotations:
-        # Nothing to override with: Streamlit can only grey out a whole selectbox,
-        # not a single option, so the box itself carries the message.
-        st.sidebar.selectbox(
-            "Override starting clusters",
-            [_NO_ANNOTATION_LABEL],
+        st.sidebar.multiselect(
+            _ANNOTATIONS_LABEL,
+            [],
             disabled=True,
-            help=help_text,
+            placeholder=f"{_LEIDEN_ONLY} (no complete annotation in the scRNA data)",
+            help=_ANNOTATIONS_HELP,
         )
-        return None
-    choice = st.sidebar.selectbox(
-        "Override starting clusters",
-        [_LEIDEN_START_LABEL, *annotations],
-        format_func=_fmt,
-        key="cfg_start",
-        help=help_text,
+        return []
+    # A choice made for another scRNA file may not exist in this one; the
+    # recorded starts are always part of the choice.
+    chosen_before = st.session_state.get("cfg_annotations", [])
+    st.session_state["cfg_annotations"] = [
+        *recorded,
+        *(a for a in chosen_before if a in annotations and a not in recorded),
+    ]
+    chosen = st.sidebar.multiselect(
+        _ANNOTATIONS_LABEL,
+        annotations,
+        key="cfg_annotations",
+        persist_state=_PERSIST,
+        placeholder=_LEIDEN_ONLY,
+        help=_ANNOTATIONS_HELP,
     )
-    return None if choice == _LEIDEN_START_LABEL else str(choice)
+    return [str(a) for a in chosen]
 
 
 def _linkage_method_row(lock: dict | None) -> str:
@@ -219,6 +245,7 @@ def _linkage_method_row(lock: dict | None) -> str:
             LINKAGE_METHODS,
             format_func=_fmt,
             key="cfg_linkage",
+            persist_state=_PERSIST,
             help="Linkage for the agglomeration tree over the start clusters. "
             "'average' (UPGMA) peels small tight groups off a dominant cell type; "
             "'ward' carries a size term and tends to produce balanced cell types.",
@@ -255,6 +282,26 @@ _SIDEBAR_CSS = (
     # The two values are Streamlit's default backgroundColor per mode.
     "div[class*='st-key-methods_box']{padding:0.5rem 0.75rem;"
     "background-color:light-dark(#ffffff,#0e1117);}"
+    # Selected multiselect values (sidebar annotations, Overview filters): a
+    # light tint of the primary blue (gui.__main__.PRIMARY_COLOR) with blue text
+    # instead of Streamlit's solid primary-colour tag.
+    "[data-testid='stMultiSelectTagsContainer'] [data-tag]{"
+    "background-color:light-dark(rgba(28,131,225,0.12),rgba(28,131,225,0.25)) !important;"
+    "color:light-dark(#1659a8,#8cc4ff) !important;}"
+    "[data-testid='stMultiSelectTagsContainer'] [data-tag] button{color:inherit !important;}"
+    # Streamlit's multiselect offers "Select all" (and "Select N matches" while
+    # filtering) with no option to turn it off; the annotation picker should
+    # not have it. Its dropdown renders outside the sidebar, so this applies to
+    # every multiselect of the app.
+    # The list is virtualized: each row sits in its own absolutely positioned
+    # 40px wrapper, so the bulk row's wrapper is hidden and the rest of the list
+    # is pulled up by one row (40px = Streamlit's dropdownItemHeight).
+    "div[data-testid='stMultiSelectDropdown'] div:has(> [data-key='__select_all__']),"
+    "div[data-testid='stMultiSelectDropdown'] div:has(> [data-key='__select_matches__'])"
+    "{display:none !important;}"
+    "div[data-testid='stMultiSelectDropdown'] [role='listbox']:has("
+    "[data-key='__select_all__'],[data-key='__select_matches__'])>div"
+    "{margin-top:-40px;}"
     "div[class*='st-key-methods_box'] label{font-size:0.875rem;}"
     # Even rhythm inside the box: the container gap is 0, so every row's
     # spacing comes from these margins alone.
@@ -298,7 +345,7 @@ def _path_row(label: str, key: str, kind: str, browse_key: str) -> str:
     """A path text field with an icon-only Browse button to its right
     (bottom-aligned so it lines up with the input, not the label)."""
     col_in, col_btn = st.sidebar.columns([5, 1], vertical_alignment="bottom")
-    val = col_in.text_input(label, key=key)
+    val = col_in.text_input(label, key=key, persist_state=_PERSIST)
     col_btn.button(
         "📁",
         key=browse_key,
@@ -320,13 +367,16 @@ def _method_rows(
     queue: list[str],
     computed: list[str],
     running_mapper: str | None,
+    missing: dict[str, int],
 ) -> list[str]:
     """The mapping-method checkboxes, grouped into baseline and reference
     mappers; returns the methods ticked to run.
 
     Every choice stays listed; its state decides whether the row is live. A method
     that is computed, running or queued is locked on: its row shows ticked and
-    disabled instead of leaving the list.
+    disabled instead of leaving the list. A computed method that lacks some of
+    the selected starting points (``missing``: their number) says so; the next
+    run fills them in.
     """
     taken = set(computed) | set(queue)
     if running_mapper:
@@ -359,16 +409,19 @@ def _method_rows(
             # `computed`); don't call it done until its thread finishes.
             if m == running_mapper:
                 state = "⏳ running"
-            elif m in computed:
-                state = "computed"
-            else:
+            elif m in queue:
                 state = "🕒 queued"
+            elif missing.get(m):
+                n = missing[m]
+                state = f"{n} starting point{'s' if n > 1 else ''} to run"
+            else:
+                state = "computed"
             # Own key namespace: `add_<m>` may already hold the user's tick.
             box.checkbox(
                 f"{label} — {state}", value=True, disabled=True, key=f"done_{m}"
             )
         elif m in selectable:
-            if box.checkbox(label, key=f"add_{m}"):
+            if box.checkbox(label, key=f"add_{m}", persist_state=_PERSIST):
                 selected.append(m)
         else:
             box.checkbox(
@@ -378,10 +431,12 @@ def _method_rows(
 
 
 def render_sidebar() -> argparse.Namespace | None:
-    """Render the sidebar (data paths, start clusters, linkage, method selection +
-    run queue).
+    """Render the sidebar (data paths, annotation starts, linkage, method
+    selection + run queue).
 
-    Returns the run settings once the paths are valid, else ``None``.
+    Returns the run settings once the paths are valid, else ``None``. Their
+    ``output_dir`` and ``pair_dir`` are both the output folder; the app points
+    ``output_dir`` at the start folder on show.
     """
     st.sidebar.title("SpatialAIM GUI")
 
@@ -424,7 +479,7 @@ def render_sidebar() -> argparse.Namespace | None:
 
     # -- step 2: scaffold knobs + methods ---------------------------------
     # The header stays visible while step 1 is incomplete; its controls need the
-    # paths (start clusters read the scRNA obs, the rest lock against the output
+    # paths (the annotations read the scRNA obs, the rest lock against the output
     # folder), so they are replaced by a hint until then.
     st.sidebar.divider()
     st.sidebar.subheader("2. Configure method")
@@ -433,37 +488,57 @@ def render_sidebar() -> argparse.Namespace | None:
         return None
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # Settings the scaffold is built from lock once this folder holds runs.
-    lock = _run_lock(out_str)
-    start_from_annotation = _start_cluster_row(sc_str, lock)
+    # Settings the runs are built from lock once this folder holds runs.
+    lock = _run_lock(out_path)
+    legacy = lock is not None and lock["legacy"]
+    if legacy:
+        st.sidebar.info(_LEGACY_NOTICE)
     linkage_method = _linkage_method_row(lock)
+    annotations = _annotation_row(sc_str, lock)
 
     settings = argparse.Namespace(
         scdata=sc_path,
         stdata=st_path,
         segmentation=seg_path if seg_path is not None and seg_path.is_file() else None,
         output_dir=out_path,
+        pair_dir=out_path,
         k_min=_DEFAULT_K_MIN,
         k_max=_DEFAULT_K_MAX,
         k_step=_DEFAULT_K_STEP,
         linkage_method=str(linkage_method),
-        start_from_annotation=start_from_annotation,
+        annotations=annotations,
+        legacy=legacy,
     )
 
     runs: dict[str, compute.MapperRun] = st.session_state.setdefault("runs", {})
     queue: list[str] = st.session_state.setdefault("queue", [])
-    computed = data_access.list_mappers(out_path)
-    running_mapper = next((m for m, r in runs.items() if r.is_running()), None)
-    selected = _method_rows(runs, queue, computed, running_mapper)
+    computed = data_access.list_pair_mappers(out_path)
+    running = next((r for r in runs.values() if r.is_running()), None)
+    running_mapper = running.mapper if running is not None else None
+    # Per computed method, the selected starting points it has not finished and
+    # that no running or queued sweep of it will cover.
+    missing: dict[str, int] = {}
+    if not legacy:
+        for m in computed:
+            if m in queue:
+                continue
+            todo = compute.missing_starts(out_path, m, annotations)
+            if m == running_mapper:
+                todo = [s for s in todo if s not in running.starts]
+            if todo:
+                missing[m] = len(todo)
+    selected = _method_rows(runs, queue, computed, running_mapper, missing)
 
     st.sidebar.divider()
     if st.sidebar.button(
         "Run",
-        disabled=not selected,
+        disabled=not (selected or missing) or legacy,
         width="stretch",
-        help="The selected methods compute one after another.",
+        help="The selected methods compute one after another, each from the "
+        "Leiden over-clustering and from every chosen annotation; methods with "
+        "results only compute the starting points they are missing.",
     ):
-        for m in selected:
+        for m in [*selected, *missing]:
             if m not in queue:
                 queue.append(m)
         # Flag a pending run so the empty-state prompt never flashes before the
@@ -474,8 +549,10 @@ def render_sidebar() -> argparse.Namespace | None:
         st.session_state["_run_requested"] = True
 
     # Surface failures.
+    # A run that failed in a later start has already written its earlier ones,
+    # so a failure is shown whether or not the mapper has results on disk.
     for m, r in list(runs.items()):
-        if r.error and not r.is_running() and m not in computed:
+        if r.error and not r.is_running():
             st.sidebar.error(f"'{m}' failed — see terminal.")
 
     return settings

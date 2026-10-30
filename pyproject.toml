@@ -48,7 +48,7 @@ dependencies = [
     "zarr>=2.16",  # reading large masks in bands
     "scikit-image>=0.22",  # shape-consistency metric (regionprops), rasterising masks
     # GUI
-    "streamlit>=1.40",
+    "streamlit>=1.61",  # persist_state (sidebar survives st.switch_page)
     "plotly>=5.20",
     "kaleido>=0.2"
 ]

@@ -43,22 +43,6 @@ there are four boxes:
   (total-count normalised to 1e4, then log1p, over the shared genes).
 """
 
-HELP_SPATIAL_ORG = """
-Quantify whether the mapped cell types form coherent tissue structure.
-
-Start with a spatial 6nn-graph: connect each spatial cell to its 6 nearest
-neighbours. Then compute:
-
-- **Local purity**: the fraction of links where two neighbours carry the same
-  cell type (z-scored against random null permutations).
-- **Self neighbourhood enrichment**: mean over all cell types of the number of
-  edges connecting two spatial cells of that cell type (z-scored against null
-  permutations).
-
-For both z-scores, 0 means the mapping is spatially no better arranged than
-random relabelling; clearly positive means it forms spatial domains.
-"""
-
 HELP_SHAPE = """
 For every segmented spatial cell in the mask, we compute:
 

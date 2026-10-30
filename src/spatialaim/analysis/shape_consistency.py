@@ -66,9 +66,10 @@ def prepare_shape_features(adata_st: AnnData, segmentation_path: Path) -> pd.Dat
     )
 
 
-def write_shape_features(table: pd.DataFrame, run_root: Path) -> None:
-    """Write the table of :func:`prepare_shape_features` to the run root."""
-    table.to_csv(Path(run_root) / SHAPE_FEATURES_CSV)
+def write_shape_features(table: pd.DataFrame, pair_output: Path) -> None:
+    """Write the table of :func:`prepare_shape_features` (6 significant digits)
+    to the pair output, once for all starts and mappers."""
+    table.to_csv(Path(pair_output) / SHAPE_FEATURES_CSV, float_format="%.6g")
 
 
 def analyse_shape_consistency(adata_st: AnnData, output_data_dir: Path) -> None:

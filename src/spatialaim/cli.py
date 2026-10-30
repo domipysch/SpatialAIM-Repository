@@ -9,12 +9,10 @@ import csv
 import logging
 import sys
 import warnings
-from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import pandas as pd
-import yaml
 
 from spatialaim.config import LINKAGE_METHODS, MAPPING_CHOICES, SpatialAIMConfig
 from spatialaim.data.validate import validate_pairs_csv, validate_single_pair
@@ -53,30 +51,18 @@ def run_one_pair(
     config: SpatialAIMConfig,
     segmentation_path: Path | None = None,
 ) -> pd.DataFrame:
-    """Run the sweep for one sc/ST pair with ``config``, saving the config as
-    ``<root_output_folder>/<mapper>/config.yaml``. ``segmentation_path`` is the
-    ST slice's optional segmentation mask."""
-    # Imported here: the sweep pulls in scanpy / squidpy, which the light
-    # commands (--help, gui, validate) do not need.
+    """Run the sweep for one sc/ST pair with ``config``: once from the Leiden
+    over-clustering (if ``config.leiden_start``) and once per annotation, each
+    into ``<root_output_folder>/<start>/<mapper>/``
+    with its ``config.yaml``. ``segmentation_path`` is the ST slice's optional
+    segmentation mask."""
     from spatialaim.sweep import run
-
-    root_output_folder = Path(root_output_folder)
-    mapping_output_folder = root_output_folder / config.mapping
-    mapping_output_folder.mkdir(parents=True, exist_ok=True)
-    with open(mapping_output_folder / "config.yaml", "w") as f:
-        yaml.safe_dump(asdict(config), f, sort_keys=False)
 
     return run(
         sc_path=sc_path,
         st_path=st_path,
-        root_output_folder=root_output_folder,
-        mapper=config.build_mapper(),
-        linkage_method=config.linkage_method,
-        leiden_resolution=config.leiden_resolution,
-        k_min=config.k_min,
-        k_max=config.k_max,
-        k_step=config.k_step,
-        start_from_annotation=config.start_from_annotation,
+        root_output_folder=Path(root_output_folder),
+        config=config,
         segmentation_path=segmentation_path,
     )
 
@@ -93,7 +79,8 @@ def run_batch(
     skipped. Returns the error messages (empty if all pairs succeeded).
 
     Segmentation masks are taken from the ``Segmentation`` column of
-    ``<st_dir>/index.csv``, if there is one.
+    ``<st_dir>/index.csv``, if there is one. A reference that lacks one of
+    ``config.annotations``, or leaves cells unlabelled by it, fails its pair.
     """
     with open(pairs_csv, newline="") as fh:
         all_pairs = list(csv.DictReader(fh))
@@ -151,6 +138,10 @@ def _read_st_index(st_dir: Path) -> dict[str, dict[str, str]]:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     _setup_logging(args.logging == "verbose")
+    annotations = args.annotation or []
+    duplicates = sorted({a for a in annotations if annotations.count(a) > 1})
+    if duplicates:
+        _fail(f"--annotation given more than once: {duplicates}")
     config = SpatialAIMConfig(
         mapping=args.mapping,
         leiden_resolution=args.leiden_resolution,
@@ -158,7 +149,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         k_min=args.k_min,
         k_max=args.k_max,
         k_step=args.k_step,
-        start_from_annotation=args.start_from_annotation,
+        annotations=annotations,
     )
 
     if args.pairs_csv is not None:
@@ -300,17 +291,19 @@ def _add_run_parser(sub: argparse._SubParsersAction) -> None:
         "conda env, once per K).",
     )
     p.add_argument(
-        "--start_from_annotation",
-        type=str,
+        "--annotation",
+        action="extend",
+        nargs="+",
         default=None,
         metavar="OBS_COLUMN",
-        help="Start the agglomeration from a pre-existing annotation instead of a "
-        "Leiden over-clustering: the named scRNA obs column's cell types become the "
-        "start clusters, no over-clustering is computed, and K sweeps from the "
-        "number of annotated types down (cells with no label are dropped). "
-        "--leiden_resolution then only governs the shared-gene reference Leiden. "
-        "Give such runs their own --output_dir: a run root is named after the "
-        "mapper alone, so the two modes would otherwise overwrite each other.",
+        help="Additionally start the agglomeration from these pre-existing "
+        "annotations (scRNA obs columns; repeatable). The sweep always runs from "
+        "the Leiden over-clustering into <output_dir>/leiden/<mapper>/, and once "
+        "per annotation into <output_dir>/annotation_<OBS_COLUMN>/<mapper>/, "
+        "where the annotation's cell types are the start clusters and K sweeps "
+        "from their number down. Every annotation must label every cell; a "
+        "missing column or an unlabelled cell is an error (in batch mode: that "
+        "pair fails).",
     )
     p.add_argument("--leiden_resolution", type=float, default=3.0)
     p.add_argument(

@@ -18,6 +18,8 @@ GUI_SUBMODULES = [
     "data_access",
     "render",
     "scaffold",
+    "views.overview",
+    "views.pages",
     "widgets",
 ]
 

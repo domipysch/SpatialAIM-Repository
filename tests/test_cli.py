@@ -23,7 +23,7 @@ def test_build_parser_lists_all_subcommands():
     assert subactions, "no subparsers found on the spatialaim parser"
     choices = set(subactions[0].choices)
     assert {"run", "gui", "validate"} <= choices
-    # `spatialaim map-annotation` was removed: `spatialaim run --start_from_annotation` is the
+    # `spatialaim map-annotation` was removed: `spatialaim run --annotation` is the
     # annotation path now.
     assert "map-annotation" not in choices
     # `spatialaim data validate` became the top-level `spatialaim validate`; the `data` group is gone.
@@ -79,17 +79,39 @@ def test_run_linkage_method_choices():
     assert exc.value.code == 2
 
 
-def test_run_start_from_annotation_defaults_to_none():
+def test_run_annotation_parsing():
     from spatialaim.config import SpatialAIMConfig
 
     parser = cli._build_parser()
     base = ["run", "--scdata", "a.h5ad", "--stdata", "b.h5ad", "--output_dir", "o"]
-    # Default = Leiden over-clustering, matching SpatialAIMConfig's.
-    assert parser.parse_args(base).start_from_annotation is None
-    assert SpatialAIMConfig().start_from_annotation is None
-    # Any obs column name is accepted verbatim (validated against the h5ad at run time).
-    args = parser.parse_args(base + ["--start_from_annotation", "cellType"])
-    assert args.start_from_annotation == "cellType"
+    # Default = Leiden start only, matching SpatialAIMConfig's.
+    assert parser.parse_args(base).annotation is None
+    assert SpatialAIMConfig().annotations == []
+    # Any obs column name is accepted verbatim (validated against the h5ad at run
+    # time); several after one flag, or the flag repeated.
+    args = parser.parse_args(base + ["--annotation", "cellType"])
+    assert args.annotation == ["cellType"]
+    args = parser.parse_args(base + ["--annotation", "a", "b", "--annotation", "c"])
+    assert args.annotation == ["a", "b", "c"]
+    # The old flag is gone.
+    with pytest.raises(SystemExit) as exc:
+        parser.parse_args(base + ["--start_from_annotation", "cellType"])
+    assert exc.value.code == 2
+
+
+def test_run_rejects_duplicate_annotations():
+    base = ["run", "--scdata", "a.h5ad", "--stdata", "b.h5ad", "--output_dir", "o"]
+    with pytest.raises(SystemExit) as exc:
+        cli.main(base + ["--annotation", "cellType", "cellType"])
+    assert exc.value.code == 2
+
+
+def test_start_folder_names():
+    from spatialaim.io import start_folder_name
+
+    assert start_folder_name(None) == "leiden"
+    assert start_folder_name("cellType") == "annotation_cellType"
+    assert start_folder_name("cell type/level 1") == "annotation_cell_type_level_1"
 
 
 def test_run_accepts_every_mapper():

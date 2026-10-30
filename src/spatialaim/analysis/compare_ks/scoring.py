@@ -31,15 +31,11 @@ def overall(table: pd.DataFrame, keys: tuple[str, ...] | None = None) -> np.ndar
     return np.where(good, points.shape[1] / np.sum(1.0 / safe, axis=1), np.nan)
 
 
-def scaled_curves(
-    df: pd.DataFrame, criterion: Criterion
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """``(raw_a, raw_b, scaled_a, scaled_b)``: the criterion's two curves, as
-    measured and on a common scale (divided by their max if ``scale_to_max``)."""
+def curves(df: pd.DataFrame, criterion: Criterion) -> tuple[np.ndarray, np.ndarray]:
+    """``(a, b)``: the criterion's two curves over K, as measured."""
     n = len(df)
-    raw = [column_values(df, column, n) for column in criterion.columns]
-    fa, fb = _scale_factors(df, criterion)
-    return (raw[0], raw[1], raw[0] * fa, raw[1] * fb)
+    a, b = (column_values(df, column, n) for column in criterion.columns)
+    return a, b
 
 
 def harmonic_mean(a, b) -> np.ndarray:
@@ -62,32 +58,15 @@ def column_values(df: pd.DataFrame, column: str, n: int) -> np.ndarray:
 
 
 def _combined(df: pd.DataFrame, criterion: Criterion) -> np.ndarray:
-    """The criterion's score per K: harmonic mean of its scaled curves."""
-    *_, scaled_a, scaled_b = scaled_curves(df, criterion)
-    return harmonic_mean(scaled_a, scaled_b)
+    """The criterion's score per K: harmonic mean of its two curves."""
+    return harmonic_mean(*curves(df, criterion))
 
 
 def _combined_null(df: pd.DataFrame, criterion: Criterion) -> np.ndarray:
-    """The same for the curves' ``<column>_null`` columns, scaled like the
-    curves. Only reconstruction has them; the others are all NaN."""
+    """The same for the curves' ``<column>_null`` columns. Only reconstruction
+    has them; the others are all NaN."""
     n = len(df)
-    fa, fb = _scale_factors(df, criterion)
-    values = [
-        column_values(df, f"{column}{NULL_SUFFIX}", n) * factor
-        for column, factor in zip(criterion.columns, (fa, fb))
-    ]
-    return harmonic_mean(values[0], values[1])
-
-
-def _scale_factors(df: pd.DataFrame, criterion: Criterion) -> tuple[float, float]:
-    """``(1, 1)``, or with ``scale_to_max`` ``1 / max`` of each curve (NaN if
-    that max is not finite and positive)."""
-    if not criterion.scale_to_max:
-        return (1.0, 1.0)
-    factors = []
-    for column in criterion.columns:
-        values = column_values(df, column, len(df))
-        finite = values[np.isfinite(values)]
-        top = float(finite.max()) if finite.size else float("nan")
-        factors.append(1.0 / top if np.isfinite(top) and top > 0 else float("nan"))
-    return (factors[0], factors[1])
+    a, b = (
+        column_values(df, f"{column}{NULL_SUFFIX}", n) for column in criterion.columns
+    )
+    return harmonic_mean(a, b)

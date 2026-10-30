@@ -1,12 +1,13 @@
 """
-Start clustering, each K's mapping,
-cached reference scaffold shared by all mappers of a pair.
+IO of Start clustering, each K's mapping, the start folder names, and the cached
+reference scaffold shared by all starts and mappers of a pair.
 """
 
 import hashlib
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import anndata
 import numpy as np
@@ -24,9 +25,22 @@ START_CLUSTERING_FILENAME = "start_clustering.h5ad"
 START_CLUSTER_TO_STATE_FILENAME = "start_cluster_to_state.csv"
 
 # Bump on any change to what the scaffold contains, so old caches are rebuilt.
-REFERENCE_SCAFFOLD_FORMAT_VERSION = 2
+REFERENCE_SCAFFOLD_FORMAT_VERSION = 4
 _SCAFFOLD_H5AD = "reference_scaffold.h5ad"
 _SCAFFOLD_META = "reference_scaffold.meta.json"
+
+LEIDEN_START_FOLDER = "leiden"
+ANNOTATION_START_PREFIX = "annotation_"
+
+
+def start_folder_name(start_from_annotation: str | None) -> str:
+    """The folder of one start below the pair output: ``leiden`` for the Leiden
+    start, ``annotation_<key>`` for an annotation (characters other than
+    letters, digits, ``.``, ``_`` and ``-`` replaced by ``_``)."""
+    if start_from_annotation is None:
+        return LEIDEN_START_FOLDER
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", start_from_annotation)
+    return ANNOTATION_START_PREFIX + safe
 
 
 def write_start_clustering(output_folder: Path, adata_sc: anndata.AnnData) -> None:
@@ -87,11 +101,10 @@ def reference_scaffold_key(
     st_path: Path,
     shared_genes,
     leiden_resolution: float,
-    start_from_annotation: str | None = None,
 ) -> dict:
     """The key a cached scaffold must match to be reused: both input files
-    (path, size, modification time), a hash of the shared genes, the Leiden
-    resolution and the start-cluster source."""
+    (path, size, modification time), a hash of the shared genes and the Leiden
+    resolution. The scaffold does not depend on the start."""
     sc_stat = Path(sc_path).stat()
     st_stat = Path(st_path).stat()
     genes = sorted(str(g) for g in shared_genes)
@@ -106,7 +119,6 @@ def reference_scaffold_key(
         "st_mtime_ns": st_stat.st_mtime_ns,
         "shared_genes_sha256": gene_hash,
         "leiden_resolution": float(leiden_resolution),
-        "start_from_annotation": start_from_annotation,
     }
 
 

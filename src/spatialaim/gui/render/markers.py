@@ -21,7 +21,7 @@ from spatialaim.analysis.loading import (
     infer_cell_to_state_cluster,
     load_start_cluster_to_state,
 )
-from spatialaim.gui import data_access
+from spatialaim.gui import data_access, demo
 from spatialaim.gui.render.common import (
     SpatialContext,
     base_layout,
@@ -108,7 +108,7 @@ def _shared_genes(adata_sc: AnnData) -> list[str]:
     return [g for g in shared if g in adata_sc.var_names]
 
 
-@st.cache_data(show_spinner="Ranking marker genes…")
+@st.cache_data(show_spinner="Ranking marker genes…", max_entries=demo.cache_entries(64))
 def _state_markers(_adata_sc, root_str: str, k: int):
     """Reference marker genes per computed cell type (``_rank_markers``) over the
     shared genes, on the all-gene lognorm layer. ``None`` when fewer than two
@@ -128,14 +128,18 @@ def _state_markers(_adata_sc, root_str: str, k: int):
     return _rank_markers(_adata_sc[:, genes].layers[LAYER_LOGNORM], cell_states, genes)
 
 
-@st.cache_resource(show_spinner="Loading spatial expression…")
+@st.cache_resource(
+    show_spinner="Loading spatial expression…", max_entries=demo.cache_entries(4)
+)
 def _spatial_lognorm(st_path_str: str, genes: tuple[str, ...]):
     """ST lognorm over ``genes`` (see ``data_access.load_spatial_lognorm``),
     loaded once per ST file and gene set."""
     return data_access.load_spatial_lognorm(Path(st_path_str), list(genes))
 
 
-@st.cache_data(show_spinner="Ranking spatial marker genes…")
+@st.cache_data(
+    show_spinner="Ranking spatial marker genes…", max_entries=demo.cache_entries(64)
+)
 def _spatial_state_markers(_adata_sc, _hard, root_str: str, k: int, st_path_str: str):
     """Spatial marker genes per *assigned* cell type (``_rank_markers`` on the ST
     lognorm, grouped by this mapper's hard assignment) over the shared genes.
@@ -271,7 +275,7 @@ def state_marker_table(
     return {"up": [row(j) for j in up], "down": [row(j) for j in down]}
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=demo.cache_entries(256))
 def gene_expression(_adata_sc, root_str: str, gene: str) -> np.ndarray:
     """Per-cell lognorm expression of ``gene`` (all-gene layer), cached per run
     root (one scaffold each) and gene."""

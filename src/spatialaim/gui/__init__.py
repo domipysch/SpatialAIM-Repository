@@ -17,5 +17,6 @@ metric itself.
 - ``scaffold.py``     the reference scaffold (cached at the output dir)
 - ``compute.py``      a mapper sweep on a background thread
 - ``state_names.py``  user-set cell-type names (the GUI's only write)
+- ``demo.py``         the read-only online demo (``--demo_data``): pair list, banner, legal pages
 - ``texts.py``        mapper labels and the report cards' help texts
 """

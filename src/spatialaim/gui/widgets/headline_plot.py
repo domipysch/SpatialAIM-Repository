@@ -13,13 +13,15 @@ their ``legendgroup`` ("state<n>"); other traces (grey below-threshold,
 continuous confidence) are left untouched. Marker sizes are rescaled on zoom, so
 the dots can stay small for the dense spatial panel without vanishing when a
 region is zoomed into. Plotly.js is loaded from a CDN (reused if the page already
-exposes it); an offline page shows an inline error instead of the plot.
+exposes it), in the online demo from the server itself; an offline page shows an
+inline error instead of the plot.
 """
 
 from __future__ import annotations
 
 import streamlit as st
 
+from spatialaim.gui import demo
 from spatialaim.gui.widgets.plotly_fit import FIT_JS
 
 _HEADLINE_JS = """
@@ -44,7 +46,9 @@ export default async function (component) {
   let Plotly = window.Plotly || window.__aimPlotly
   if (!Plotly) {
     try {
-      Plotly = (await import(CDN)).default
+      Plotly = data.plotlyUrl
+        ? await loadLocalPlotly(data.plotlyUrl)
+        : (await import(CDN)).default
       window.__aimPlotly = Plotly
     } catch (e) {
       gd.textContent = "Could not load Plotly.js (needs internet): " + e
@@ -313,6 +317,7 @@ def headline_plot(
             "figureJson": fig.to_json(),
             "offColor": off_color,
             "contextMenu": context_menu,
+            "plotlyUrl": demo.plotly_url(),
         },
         on_menu_state_change=lambda: None,
     )

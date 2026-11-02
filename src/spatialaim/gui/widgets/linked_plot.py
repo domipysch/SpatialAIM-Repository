@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from spatialaim.gui import demo
 from spatialaim.gui.widgets.plotly_fit import FIT_JS
 
 _LINKED_JS = """
@@ -47,7 +48,9 @@ export default async function (component) {
   let Plotly = window.Plotly || window.__aimPlotly
   if (!Plotly) {
     try {
-      Plotly = (await import(CDN)).default
+      Plotly = data.plotlyUrl
+        ? await loadLocalPlotly(data.plotlyUrl)
+        : (await import(CDN)).default
       window.__aimPlotly = Plotly
     } catch (e) {
       gd.textContent = "Could not load Plotly.js (needs internet): " + e
@@ -160,7 +163,11 @@ def linked_plot(fig, key: str, *, group: str, on_pick=None) -> None:
     """
     _LINKED_PLOT(
         key=key,
-        data={"figureJson": fig.to_json(), "group": group},
+        data={
+            "figureJson": fig.to_json(),
+            "group": group,
+            "plotlyUrl": demo.plotly_url(),
+        },
         on_picked_k_change=on_pick if on_pick is not None else lambda: None,
     )
 

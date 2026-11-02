@@ -1,7 +1,9 @@
 """
 The sidebar: data paths (step 1), the annotations to start from besides the
 Leiden over-clustering, linkage and mapping methods to run (step 2), and the
-footer with the version and the feedback link.
+footer with the version and the feedback link. In the online demo
+(``demo.ACTIVE``) step 1 is a pick of a precomputed pair and step 2 only shows
+what was computed for it.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from packaging.version import InvalidVersion, Version
 
 from spatialaim import LINKAGE_METHODS, MAPPING_CHOICES
 from spatialaim.config import _INPROCESS_METHODS
-from spatialaim.gui import compute, data_access
+from spatialaim.gui import compute, data_access, demo
 from spatialaim.gui.loaders import obs_columns
 from spatialaim.gui.texts import MAPPER_LABELS
 from spatialaim.gui.validation import (
@@ -139,9 +141,13 @@ def _clear_session() -> None:
     st.session_state.pop("_validation_seen", None)
     st.session_state.pop("_validation_reopen", None)
     st.session_state.pop("_show_data_help", None)
-    # Drop transient widget state: the method checkboxes, the result pages'
-    # controls and remembered view (start, method, K), and every per-view /
-    # best-K control.
+    _drop_view_state()
+
+
+def _drop_view_state() -> None:
+    """Drop transient widget state: the method checkboxes, the result pages'
+    controls and remembered view (start, method, K), and every per-view /
+    best-K control."""
     for k in list(st.session_state.keys()):
         if k.startswith(
             (
@@ -438,6 +444,8 @@ def render_sidebar() -> argparse.Namespace | None:
     ``output_dir`` and ``pair_dir`` are both the output folder; the app points
     ``output_dir`` at the start folder on show.
     """
+    if demo.ACTIVE:
+        return _render_demo_sidebar()
     st.sidebar.title("SpatialAIM GUI")
 
     # -- step 1: data paths ----------------------------------------------
@@ -558,6 +566,96 @@ def render_sidebar() -> argparse.Namespace | None:
     return settings
 
 
+def _render_demo_sidebar() -> argparse.Namespace | None:
+    """The demo's sidebar: pick a precomputed pair, then see how it was computed.
+
+    Returns the same settings as ``render_sidebar`` (``None`` without any pair),
+    pinned to what the pair output holds, so the result pages read it like a
+    finished local run.
+    """
+    demo.banner()
+    st.sidebar.markdown(_SIDEBAR_CSS, unsafe_allow_html=True)
+    st.sidebar.title("SpatialAIM")
+    st.sidebar.subheader("1. Select data")
+    pairs = demo.list_pairs()
+    if not pairs:
+        st.sidebar.caption("No precomputed results available.")
+        return None
+    by_label = {p.label: p for p in pairs}
+    label = st.sidebar.selectbox(
+        "Dataset pair (scRNA × ST)",
+        list(by_label),
+        key="demo_pair",
+        persist_state=_PERSIST,
+        on_change=_drop_view_state,
+        help="Public scRNA-seq references and spatial slices, each mapped in "
+        "advance. Choosing another pair resets the result pages.",
+    )
+    pair = by_label[label]
+    details = " · ".join(x for x in (pair.tissue, pair.author) if x)
+    if pair.source:
+        details += f" · [source]({pair.source})"
+    if details:
+        st.sidebar.caption(details)
+
+    st.sidebar.divider()
+    st.sidebar.subheader("2. Method")
+    lock = _run_lock(pair.pair_dir)
+    linkage_method = _linkage_method_row(lock)
+    annotations = lock["annotations"] if lock is not None else []
+    # The full sidebar's controls, disabled and showing what was computed.
+    st.sidebar.multiselect(
+        _ANNOTATIONS_LABEL,
+        annotations,
+        default=annotations,
+        disabled=True,
+        placeholder=_LEIDEN_ONLY,
+        key=f"demo_annotations_{pair.pair_id}",
+        help="SpatialAIM always starts from a Leiden over-clustering of the "
+        "reference; these annotations were additionally used as starting points.",
+    )
+    _demo_method_rows(data_access.list_pair_mappers(pair.pair_dir), pair.pair_id)
+    return argparse.Namespace(
+        scdata=pair.sc_path,
+        stdata=pair.st_path,
+        segmentation=pair.segmentation,
+        output_dir=pair.pair_dir,
+        pair_dir=pair.pair_dir,
+        k_min=_DEFAULT_K_MIN,
+        k_max=_DEFAULT_K_MAX,
+        k_step=_DEFAULT_K_STEP,
+        linkage_method=str(linkage_method),
+        annotations=annotations,
+        legacy=lock is not None and lock["legacy"],
+    )
+
+
+def _demo_method_rows(computed: list[str], pair_id: int) -> None:
+    """The demo's read-only method list: ``_method_rows``' box with every method
+    disabled, ticked where it was computed for the pair."""
+    st.sidebar.markdown(
+        "<div class='spatialaim-group-label'>Computed mapping methods</div>",
+        unsafe_allow_html=True,
+    )
+    box = st.sidebar.container(border=True, gap=0, key="methods_box")
+    heading_shown: set[str] = set()
+    for m in MAPPING_CHOICES:
+        heading = "Baseline mappers" if m in _INPROCESS_METHODS else "Reference mappers"
+        if heading not in heading_shown:
+            first = "" if heading_shown else " spatialaim-first"
+            heading_shown.add(heading)
+            box.markdown(
+                f"<div class='spatialaim-mapper-group{first}'>{heading}</div>",
+                unsafe_allow_html=True,
+            )
+        box.checkbox(
+            MAPPER_LABELS.get(m, m),
+            value=m in computed,
+            disabled=True,
+            key=f"demo_method_{m}_{pair_id}",
+        )
+
+
 @st.dialog("Feedback")
 def _feedback_dialog() -> None:
     """Where to send ideas and bug reports — the tool has no in-app channel."""
@@ -588,12 +686,26 @@ _FOOTER_CSS = (
     "div[class*='st-key-feedback_btn'] button{opacity:0.5;}"
     "div[class*='st-key-feedback_btn'] button:hover{opacity:1;}"
     "div[class*='st-key-feedback_btn'] button p{font-size:0.8rem;}"
+    # The demo's legal links: plain dimmed text like the Feedback link, without
+    # the page-link pill (also not on the page currently shown).
+    "div[class*='st-key-sidebar_footer'] a{opacity:0.5;padding:0;"
+    "background:none !important;min-height:0;}"
+    "div[class*='st-key-sidebar_footer'] a:hover{opacity:1;}"
+    "div[class*='st-key-sidebar_footer'] a p,"
+    "div[class*='st-key-sidebar_footer'] a span{font-size:0.8rem;font-weight:400;}"
+    # Every footer item keeps its natural width, so each row reads left to right.
+    "div[class*='st-key-sidebar_footer'] div[class*='stElementContainer']"
+    "{flex:0 0 auto !important;width:auto !important;}"
+    # A hairline above the demo's footer.
+    "div[class*='st-key-sidebar_footer']:has(a){border-top:1px solid "
+    "light-dark(rgba(49,51,63,0.15),rgba(250,250,250,0.15));padding-top:0.5rem;}"
     "</style>"
 )
 
 
-def render_sidebar_footer() -> None:
-    """Feedback link at the very bottom of the sidebar.
+def render_sidebar_footer(legal_pages: list | None = None) -> None:
+    """Feedback link at the very bottom of the sidebar, and in the demo the
+    links to the imprint and privacy policy (``legal_pages``).
 
     Called from ``main`` rather than from ``render_sidebar`` so it sits below both of
     that function's exits — including the early one taken while the data paths
@@ -612,20 +724,25 @@ def render_sidebar_footer() -> None:
     leave the link floating well above the edge, so it is cut to 1rem.
     """
     st.sidebar.markdown(_FOOTER_CSS, unsafe_allow_html=True)
-    footer = st.sidebar.container(
-        horizontal=True, vertical_alignment="center", key="sidebar_footer"
-    )
+    footer = st.sidebar.container(gap="xsmall", key="sidebar_footer")
+    row = footer.container(horizontal=True, vertical_alignment="center")
     full_version = _app_version()
-    footer.caption(
+    row.caption(
         f"v{_release_version(full_version)}", help=f"spatial-aim {full_version}"
     )
-    if footer.button(
+    if row.button(
         "Feedback",
         icon=":material/chat_bubble:",
         type="tertiary",
         key="feedback_btn",
     ):
         _feedback_dialog()
+    if legal_pages:
+        legal = footer.container(
+            horizontal=True, vertical_alignment="center", gap="medium"
+        )
+        for page in legal_pages:
+            legal.page_link(page, label=page.title, width="content")
 
 
 def _app_version() -> str:

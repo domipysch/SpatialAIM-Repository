@@ -1,5 +1,6 @@
 """
-Explicit plot sizing shared by the client-side Plotly components.
+Explicit plot sizing shared by the client-side Plotly components, and their
+loader for a locally served Plotly.js (the online demo contacts no CDN).
 
 Plotly's own autosizing is unreliable inside Streamlit: a plot (re)drawn while
 its tab is hidden (zero width) falls back to Plotly's 700 px default and stays
@@ -14,6 +15,21 @@ that happened while hidden).
 """
 
 FIT_JS = """
+// Load the UMD Plotly.js bundle at ``url`` once per page (one shared script tag,
+// however many components ask at the same time) and return ``window.Plotly``.
+const loadLocalPlotly = (url) => {
+  if (!window.__aimPlotlyLoad) {
+    window.__aimPlotlyLoad = new Promise((resolve, reject) => {
+      const s = document.createElement("script")
+      s.src = new URL(url, document.baseURI).href
+      s.onload = () => resolve(window.Plotly)
+      s.onerror = () => reject(new Error("could not load " + s.src))
+      document.head.appendChild(s)
+    })
+  }
+  return window.__aimPlotlyLoad
+}
+
 // Prepare ``layout`` for drawing into ``gd``: pin the div height to the figure
 // height and the layout width to the container (or, while hidden, the last
 // drawn width, so a hidden redraw does not collapse to Plotly's default).

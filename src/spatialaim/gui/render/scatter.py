@@ -24,7 +24,7 @@ from spatialaim.adata_schema import (
     UNS_START_CLUSTER_NAMES,
 )
 from spatialaim.analysis.loading import load_start_cluster_to_state
-from spatialaim.gui import data_access
+from spatialaim.gui import data_access, demo
 from spatialaim.gui.render.common import (
     TAB20,
     hex_color,
@@ -130,7 +130,7 @@ def _add_state_centroid_markers(
         )
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=demo.cache_entries(64))
 def umap_panel_data(
     _adata_sc, root_str: str, k: int, umap_key: str, want_centroids: bool
 ):

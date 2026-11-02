@@ -13,10 +13,10 @@ import pandas as pd
 import streamlit as st
 from anndata import AnnData
 
-from spatialaim.gui import compute, data_access, scaffold
+from spatialaim.gui import compute, data_access, demo, scaffold
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=demo.cache_entries(64))
 def load_soft(root_str: str, k: int):
     return data_access.load_soft(Path(root_str), k)
 
@@ -34,12 +34,13 @@ def shape_features(root: Path) -> pd.DataFrame | None:
     return _cached_shape_features(str(root), mtime)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=demo.cache_entries(16))
 def spatial_coords(st_path_str: str):
     return data_access.load_spatial_coords(Path(st_path_str))
 
 
-@st.cache_resource(show_spinner=False)
+# The scaffold is the largest object the GUI holds; the demo keeps a few.
+@st.cache_resource(show_spinner=False, max_entries=demo.cache_entries(4))
 def _scaffold_sc(
     sc_path_str: str,
     st_path_str: str,

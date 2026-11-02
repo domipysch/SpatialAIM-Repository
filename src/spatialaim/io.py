@@ -122,9 +122,12 @@ def reference_scaffold_key(
     }
 
 
-def read_reference_scaffold(cache_dir: Path, key: dict) -> anndata.AnnData | None:
-    """The cached scaffold in ``cache_dir`` if it was stored under ``key``,
-    else ``None`` (also when the cache is missing or unreadable)."""
+def read_reference_scaffold(
+    cache_dir: Path, key: dict, ignore: tuple[str, ...] = ()
+) -> anndata.AnnData | None:
+    """The cached scaffold in ``cache_dir`` if it was stored under ``key`` (up to
+    the ``ignore``d fields), else ``None`` (also when the cache is missing or
+    unreadable)."""
     cache_dir = Path(cache_dir)
     h5ad_path = cache_dir / _SCAFFOLD_H5AD
     meta_path = cache_dir / _SCAFFOLD_META
@@ -133,7 +136,9 @@ def read_reference_scaffold(cache_dir: Path, key: dict) -> anndata.AnnData | Non
     try:
         with open(meta_path, encoding="utf-8") as fh:
             stored = json.load(fh)
-        if stored != key:
+        if {k: v for k, v in stored.items() if k not in ignore} != {
+            k: v for k, v in key.items() if k not in ignore
+        }:
             return None
         adata_sc = anndata.read_h5ad(h5ad_path)
     except Exception:  # noqa: BLE001 - a corrupt cache is just a miss

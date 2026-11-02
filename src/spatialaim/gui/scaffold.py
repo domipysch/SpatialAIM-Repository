@@ -8,7 +8,10 @@ sweep computes once per pair via ``spatialaim.sweep.build_reference_scaffold`` a
 ``restrict_to_shared_genes``. It is start-, mapper- and
 K-independent, so the sweep caches it once per (sc, ST) pair at
 ``<pair output>/reference_scaffold.h5ad``. This module reads that same shared cache,
-and builds + writes it on a miss so a later sweep reuses it. The start clusters and
+and builds + writes it on a miss so a later sweep reuses it. The online demo only
+reads: its precomputed outputs were written on another machine, so the input
+files' paths and mtimes in the cache key are not compared there, and a miss is an
+error rather than a build. The start clusters and
 their aggregates are then added via ``spatialaim.sweep.set_start_clusters``.
 
 ``start_from_annotation`` must match the sweep that wrote the output dir (see
@@ -39,9 +42,12 @@ from spatialaim.sweep import (
     set_start_clusters,
 )
 
-from . import data_access
+from . import data_access, demo
 
 logger = logging.getLogger(__name__)
+
+# Cache-key fields that differ once a pair output is copied to another machine.
+_MACHINE_KEY_FIELDS = ("sc_path", "sc_mtime_ns", "st_path", "st_mtime_ns")
 
 
 def _build_sc(
@@ -121,7 +127,12 @@ def load_or_build_sc(
         _shared_genes(sc_path, st_path),
         resolution,
     )
-    adata_sc = aim_io.read_reference_scaffold(cache_dir, key)
+    if demo.ACTIVE:
+        adata_sc = aim_io.read_reference_scaffold(cache_dir, key, _MACHINE_KEY_FIELDS)
+        if adata_sc is None:
+            raise RuntimeError(f"no precomputed reference scaffold in {cache_dir}")
+    else:
+        adata_sc = aim_io.read_reference_scaffold(cache_dir, key)
     if adata_sc is None:
         logger.info("Building reference scaffold (one-time)...")
         adata_sc = _build_sc(sc_path, st_path, resolution)

@@ -7,6 +7,8 @@ out the results as pages behind a top navigation: the Overview of every
 starting point × method, Explore (one starting point × method at one K),
 Compare (several methods of one starting point) and the single-cell Reference.
 While a sweep runs it polls, so progress and new results appear on their own.
+The online demo (``demo.ACTIVE``) shows the same pages over precomputed results,
+without the run queue, plus its imprint and privacy policy.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import time
 
 import streamlit as st
 
-from spatialaim.gui import compute, data_access
+from spatialaim.gui import compute, data_access, demo
 from spatialaim.gui.sidebar import render_sidebar, render_sidebar_footer
 from spatialaim.gui.views.overview import overview_view
 from spatialaim.gui.views.pages import (
@@ -65,19 +67,22 @@ def _n_finished(start: data_access.Start) -> int:
     )
 
 
-def _pages(ctx: ViewContext, disk_starts: list[data_access.Start]) -> list:
+def _pages(
+    ctx: ViewContext, disk_starts: list[data_access.Start], landing: str | None = None
+) -> list:
     """The navigation's pages. The Overview and Reference join once a sweep has
     finished, Compare once one start has two finished methods; the landing page
     is the Overview then, before that Explore (which shows the progress of a
-    running sweep)."""
+    running sweep). ``landing="explore"`` always lands on Explore."""
     per_start = [_n_finished(s) for s in disk_starts]
     n_finished = sum(per_start)
+    explore_first = landing == "explore" or n_finished == 0
     explore = st.Page(
         lambda: explore_page(ctx),
         title="Explore",
         icon=":material/travel_explore:",
         url_path="explore",
-        default=n_finished == 0,
+        default=explore_first,
     )
 
     def _open(start: data_access.Start, mapper: str) -> None:
@@ -92,7 +97,7 @@ def _pages(ctx: ViewContext, disk_starts: list[data_access.Start]) -> list:
                 title="Overview",
                 icon=":material/leaderboard:",
                 url_path="overview",
-                default=True,
+                default=not explore_first,
             )
         )
     pages.append(explore)
@@ -117,9 +122,29 @@ def _pages(ctx: ViewContext, disk_starts: list[data_access.Start]) -> list:
     return pages
 
 
+def demo_main() -> None:
+    """One run of the online demo: the pair picker and the result pages of the
+    chosen pair, landing on Explore. Nothing runs, so there is no queue or
+    polling."""
+    st.set_page_config(page_title="SpatialAIM demo", layout="wide")
+    settings = render_sidebar()
+    legal = demo.legal_pages()
+    if settings is None:
+        pages = [st.Page(demo.no_data_view, title="SpatialAIM", default=True)]
+    else:
+        starts = data_access.list_starts(settings.pair_dir)
+        pages = _pages(ViewContext(settings, {}, [], starts), starts, landing="explore")
+    nav = st.navigation([*pages, *legal], position="top")
+    render_sidebar_footer(legal)
+    nav.run()
+
+
 def main() -> None:
     """One run of the app: sidebar, queue, the result pages, and the polling
     rerun."""
+    if demo.ACTIVE:
+        demo_main()
+        return
     st.set_page_config(page_title="SpatialAIM GUI", layout="wide")
     settings = render_sidebar()
     render_sidebar_footer()

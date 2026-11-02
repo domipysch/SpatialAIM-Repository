@@ -1,0 +1,17 @@
+# Build context of deploy/demo/Dockerfile: only pyproject, README, LICENSE, src/
+# and deploy/demo/ are needed.
+.git
+.github
+.idea
+.claude
+.venv
+.mypy_cache
+.pytest_cache
+**/__pycache__
+**/*.egg-info
+docs
+playground
+sample_dataset
+sample_output
+tests
+src/spatialaim/gui/static

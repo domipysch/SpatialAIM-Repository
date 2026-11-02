@@ -17,7 +17,7 @@ from typing import Callable, NamedTuple
 import streamlit as st
 
 from spatialaim import MAPPING_CHOICES
-from spatialaim.gui import compute, data_access
+from spatialaim.gui import compute, data_access, demo
 from spatialaim.gui.views.choose_k import best_overall_k
 from spatialaim.gui.views.compare_tab import compare_tab
 from spatialaim.gui.views.controls import (
@@ -131,7 +131,11 @@ def _no_results(ctx: ViewContext) -> None:
     st.info(
         "Computing… results appear here as soon as a method has finished."
         if busy
-        else "No finished results yet. Select methods in the sidebar and click **Run**."
+        else (
+            "No finished results yet."
+            if demo.ACTIVE
+            else "No finished results yet. Select methods in the sidebar and click **Run**."
+        )
     )
 
 

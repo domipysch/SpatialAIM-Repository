@@ -4,6 +4,8 @@
 CLAUDE.md
 .claude/
 sample_output/
+# Plotly.js for the online demo, downloaded at image build (deploy/demo/Dockerfile)
+src/spatialaim/gui/static/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

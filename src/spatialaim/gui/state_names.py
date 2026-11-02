@@ -16,7 +16,8 @@ types): there the tree cut is the identity, so every state *is* one annotated
 type and defaults to that type's name (``annotation_names``); a name set by hand
 still wins.
 
-This is the GUI's only write path onto disk. Nothing in the sweep or the analysis
+This is the GUI's only write path onto disk. The online demo keeps names per
+session instead (``_session_names``): its results are shared and read-only. Nothing in the sweep or the analysis
 reads the file -- losing it costs the labels and nothing else. Because the key is
 K alone, names do go stale if the same output dir is later rebuilt with a
 different linkage (which the GUI prevents by locking it per output folder).
@@ -30,14 +31,20 @@ from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
+import streamlit as st
 
 from spatialaim.io import START_CLUSTER_TO_STATE_FILENAME
 
-from . import data_access
+from . import data_access, demo
 
 logger = logging.getLogger(__name__)
 
 FILENAME = "cell_type_names.json"
+
+
+def _session_names() -> dict[str, dict]:
+    """The demo's per-session stand-in for the names files, by file path."""
+    return st.session_state.setdefault("_demo_cell_type_names", {})
 
 
 def path_for(output_dir: Path) -> Path:
@@ -52,6 +59,8 @@ def load_all(output_dir: Path) -> dict[str, dict[str, str]]:
     default ``Cell type <n>`` rather than taking the results view down.
     """
     path = path_for(output_dir)
+    if demo.ACTIVE and str(path) in _session_names():
+        return _session_names()[str(path)]
     if not path.exists():
         return {}
     try:
@@ -152,6 +161,9 @@ def save(output_dir: Path, k: int, names: dict[int, str]) -> None:
         data.pop(str(int(k)), None)
 
     path = path_for(output_dir)
+    if demo.ACTIVE:
+        _session_names()[str(path)] = data
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:

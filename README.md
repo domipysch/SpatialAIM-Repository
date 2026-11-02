@@ -144,6 +144,8 @@ It writes the same layout as the CLI, `<output_dir>/<start>/<mapper>/`. The resu
 Once an output folder holds results, its linkage is fixed. Mappers and annotations can still be added: the next *Run* computes every missing starting point × mapper combination. Output folders written by earlier versions (`<output_dir>/<mapper>/`) can still be opened and viewed.
 An optional **Segmentation path** (the ST slice's cell segmentation mask, see the sidebar's *Info*) is validated with the pair and passed to the runs; their Explore views then get a "Shape features" card (shape consistency and the cells' area / eccentricity / solidity per cell type), and the cell-type modal a "Shape features" view. Without it the GUI is unchanged.
 
+`spatialaim gui --demo_data <dir>` serves the read-only online demo instead: a pick of precomputed public pairs, no runs, no exports. Building and deploying it as a Docker container: [deploy/demo/README.md](deploy/demo/README.md).
+
 ### Run via CLI (`spatialaim run`)
 
 Run SpatialAIM via CLI on a single pair or in batch mode.

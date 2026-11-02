@@ -17,7 +17,7 @@ import pandas as pd
 from spatialaim.config import LINKAGE_METHODS, MAPPING_CHOICES, SpatialAIMConfig
 from spatialaim.data.validate import validate_pairs_csv, validate_single_pair
 from spatialaim.data.validate.validate_st import SEGMENTATION_DIR_NAME
-from spatialaim.gui.__main__ import launch
+from spatialaim.gui.__main__ import add_demo_arguments, launch
 
 # Harmless warnings of the sweep stack (imported in run_one_pair): conda ships
 # two OpenMP runtimes (threadpoolctl warns on every call), and docrep (via
@@ -181,7 +181,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 # spatialaim gui / spatialaim validate
 # --------------------------------------------------------------------------- #
 def _cmd_gui(args: argparse.Namespace) -> int:
-    return launch(server_port=args.server_port)
+    return launch(args.server_port, args.demo_data, args.legal_dir)
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
@@ -344,6 +344,7 @@ def _add_gui_parser(sub: argparse._SubParsersAction) -> None:
         default=8501,
         help="Port for the Streamlit server (default 8501).",
     )
+    add_demo_arguments(p)
     p.set_defaults(func=_cmd_gui)
 
 

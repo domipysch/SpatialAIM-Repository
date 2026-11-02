@@ -18,12 +18,25 @@ deploy/demo/
 /srv/spatialaim-demo/data/        # mounted read-only at /data
 ├── datasets/                     # = Data/01_Datasets_Paper (scRNA/, ST/, pairs.csv, index.csv files)
 └── results/
-    └── <PairID:03d>_<scName>__<stName>/   # one pair output each (spatialaim run --pairs_csv naming)
+    ├── average/
+    │   └── <PairID:03d>_<scName>__<stName>/   # one pair output each (spatialaim run --pairs_csv naming)
+    └── ward/
+        └── <PairID:03d>_<scName>__<stName>/
+```
+
+Each linkage folder is one batch run with that `--linkage_method`, e.g.
+
+```bash
+spatialaim run --pairs_csv datasets/pairs.csv --sc_dir datasets/scRNA --st_dir datasets/ST --output_dir results/ward --linkage_method ward --mapping <mapper> --annotation <obs_column> ...
 ```
 
 Each pair output has the usual layout `<start>/<mapper>/` plus `reference_scaffold.h5ad`, as
-written by `spatialaim run` or the GUI. Only pairs whose results folder holds at least one finished
-start appear in the picker, so the demo can go live with a subset and grow.
+written by `spatialaim run` or the GUI. Only pairs with at least one finished start (in any
+linkage) appear in the picker, so the demo can go live with a subset and grow; the sidebar's
+linkage dropdown offers the linkages a pair has. A pair output directly in `results/` (no linkage
+folder) still works, under the linkage its configs record. An optional `Name`
+column in `pairs.csv` sets the picker's label for a pair; empty or missing, it shows
+`<PairID> · <scName> × <stName>`.
 
 Results can be computed anywhere and copied over: the demo compares the scaffold cache key without
 the input files' paths and modification times. It never rebuilds a missing scaffold (that pair then

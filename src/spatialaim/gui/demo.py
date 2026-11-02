@@ -9,9 +9,13 @@ disk. The data root holds::
 
     <data root>/
     ├── datasets/        # the paper's relational layout: scRNA/, ST/, pairs.csv
-    └── results/         # one pair output per pair, <PairID:03d>_<scName>__<stName>/
+    └── results/
+        └── <linkage>/   # one batch run per linkage (average/, ward/)
+            └── <PairID:03d>_<scName>__<stName>/   # one pair output per pair
 
-Every pair of ``pairs.csv`` whose output holds a start is offered. The imprint
+A pair output directly in ``results/`` is read too, under the linkage its configs
+record. Every pair of ``pairs.csv`` with a pair output holding a start is offered,
+under its optional ``Name`` column (else PairID and dataset names). The imprint
 (Impressum) and the privacy policy are Markdown files in ``SPATIALAIM_DEMO_LEGAL``
 (``imprint.md``, ``privacy.md``), read on every render so they can be
 edited without a restart.
@@ -26,6 +30,7 @@ from typing import NamedTuple
 
 import streamlit as st
 
+from spatialaim import LINKAGE_METHODS
 from spatialaim.gui import data_access
 
 DATA_ENV = "SPATIALAIM_DEMO_DATA"
@@ -72,16 +77,36 @@ class DemoPair(NamedTuple):
     sc_path: Path
     st_path: Path
     segmentation: Path | None
-    pair_dir: Path
+    outputs: dict[str, Path]  # linkage -> pair output, LINKAGE_METHODS order
     tissue: str
     author: str
     source: str
+    name: str
 
     @property
     def label(self) -> str:
+        if self.name:
+            return self.name
         if self.sc_name == self.st_name:
             return f"{self.pair_id:03d} · {self.sc_name}"
         return f"{self.pair_id:03d} · {self.sc_name} × {self.st_name}"
+
+
+def _pair_outputs(folder_name: str) -> dict[str, Path]:
+    """A pair's outputs by linkage: ``results/<linkage>/<folder>`` and a
+    ``results/<folder>`` under the linkage its configs record (the first
+    found wins); only outputs holding a start count."""
+    found: dict[str, Path] = {}
+    candidates = [(m, RESULTS_DIR / m / folder_name) for m in LINKAGE_METHODS]
+    candidates.append((LINKAGE_METHODS[0], RESULTS_DIR / folder_name))
+    for default, pair_dir in candidates:
+        starts = data_access.list_starts(pair_dir)
+        if not starts:
+            continue
+        recorded = (data_access.linkage_method_from_config(s.folder) for s in starts)
+        found.setdefault(next((m for m in recorded if m), default), pair_dir)
+    order = {m: i for i, m in enumerate(LINKAGE_METHODS)}
+    return dict(sorted(found.items(), key=lambda kv: order.get(kv[0], len(order))))
 
 
 def _index(path: Path) -> dict[str, dict[str, str]]:
@@ -108,10 +133,10 @@ def list_pairs() -> list[DemoPair]:
         pair_id, sc_name, st_name = int(row["PairID"]), row["scName"], row["stName"]
         sc_path = DATASETS_DIR / "scRNA" / f"{sc_name}.h5ad"
         st_path = DATASETS_DIR / "ST" / f"{st_name}.h5ad"
-        pair_dir = RESULTS_DIR / f"{pair_id:03d}_{sc_name}__{st_name}"
         if not (sc_path.is_file() and st_path.is_file()):
             continue
-        if not data_access.list_starts(pair_dir):
+        outputs = _pair_outputs(f"{pair_id:03d}_{sc_name}__{st_name}")
+        if not outputs:
             continue
         mask = (st_index.get(st_name) or {}).get("Segmentation", "").strip()
         seg = DATASETS_DIR / "ST" / "Segmentation" / mask if mask else None
@@ -124,10 +149,11 @@ def list_pairs() -> list[DemoPair]:
                 sc_path,
                 st_path,
                 seg if seg is not None and seg.is_file() else None,
-                pair_dir,
+                outputs,
                 sc_row.get("Tissue", ""),
                 sc_row.get("Autor", ""),
                 sc_row.get("Quelle", ""),
+                (row.get("Name") or "").strip(),
             )
         )
     return pairs

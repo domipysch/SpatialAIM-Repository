@@ -57,6 +57,11 @@ _LINKAGE_LABELS = {
     "average": "average - allow for outlier cell types",
     "ward": "ward - more balanced cell types",
 }
+_LINKAGE_HELP = (
+    "Linkage for the agglomeration tree over the start clusters. "
+    "'average' (UPGMA) peels small tight groups off a dominant cell type; "
+    "'ward' carries a size term and tends to produce balanced cell types."
+)
 
 # The sidebar's keyed inputs keep their values for the whole session.
 # st.switch_page (the Overview's Open button) reruns without the frontend's
@@ -252,9 +257,7 @@ def _linkage_method_row(lock: dict | None) -> str:
             format_func=_fmt,
             key="cfg_linkage",
             persist_state=_PERSIST,
-            help="Linkage for the agglomeration tree over the start clusters. "
-            "'average' (UPGMA) peels small tight groups off a dominant cell type; "
-            "'ward' carries a size term and tends to produce balanced cell types.",
+            help=_LINKAGE_HELP,
         )
     )
 
@@ -581,17 +584,18 @@ def _render_demo_sidebar() -> argparse.Namespace | None:
     if not pairs:
         st.sidebar.caption("No precomputed results available.")
         return None
-    by_label = {p.label: p for p in pairs}
-    label = st.sidebar.selectbox(
+    by_id = {p.pair_id: p for p in pairs}
+    pair_id = st.sidebar.selectbox(
         "Dataset pair (scRNA × ST)",
-        list(by_label),
+        list(by_id),
+        format_func=lambda i: by_id[i].label,
         key="demo_pair",
         persist_state=_PERSIST,
         on_change=_drop_view_state,
         help="Public scRNA-seq references and spatial slices, each mapped in "
         "advance. Choosing another pair resets the result pages.",
     )
-    pair = by_label[label]
+    pair = by_id[pair_id]
     details = " · ".join(x for x in (pair.tissue, pair.author) if x)
     if pair.source:
         details += f" · [source]({pair.source})"
@@ -600,8 +604,21 @@ def _render_demo_sidebar() -> argparse.Namespace | None:
 
     st.sidebar.divider()
     st.sidebar.subheader("2. Method")
-    lock = _run_lock(pair.pair_dir)
-    linkage_method = _linkage_method_row(lock)
+    linkage_method = str(
+        st.sidebar.selectbox(
+            "Linkage method",
+            list(pair.outputs),
+            format_func=lambda m: _LINKAGE_LABELS.get(m, m),
+            key=f"demo_linkage_{pair.pair_id}",
+            persist_state=_PERSIST,
+            on_change=_drop_view_state,
+            disabled=len(pair.outputs) == 1,
+            help=f"{_LINKAGE_HELP} Changing it resets the result pages.",
+        )
+    )
+    pair_dir = pair.outputs[linkage_method]
+    view_key = f"{pair.pair_id}_{linkage_method}"
+    lock = _run_lock(pair_dir)
     annotations = lock["annotations"] if lock is not None else []
     # The full sidebar's controls, disabled and showing what was computed.
     st.sidebar.multiselect(
@@ -610,17 +627,17 @@ def _render_demo_sidebar() -> argparse.Namespace | None:
         default=annotations,
         disabled=True,
         placeholder=_LEIDEN_ONLY,
-        key=f"demo_annotations_{pair.pair_id}",
+        key=f"demo_annotations_{view_key}",
         help="SpatialAIM always starts from a Leiden over-clustering of the "
         "reference; these annotations were additionally used as starting points.",
     )
-    _demo_method_rows(data_access.list_pair_mappers(pair.pair_dir), pair.pair_id)
+    _demo_method_rows(data_access.list_pair_mappers(pair_dir), view_key)
     return argparse.Namespace(
         scdata=pair.sc_path,
         stdata=pair.st_path,
         segmentation=pair.segmentation,
-        output_dir=pair.pair_dir,
-        pair_dir=pair.pair_dir,
+        output_dir=pair_dir,
+        pair_dir=pair_dir,
         k_min=_DEFAULT_K_MIN,
         k_max=_DEFAULT_K_MAX,
         k_step=_DEFAULT_K_STEP,
@@ -630,9 +647,9 @@ def _render_demo_sidebar() -> argparse.Namespace | None:
     )
 
 
-def _demo_method_rows(computed: list[str], pair_id: int) -> None:
+def _demo_method_rows(computed: list[str], view_key: str) -> None:
     """The demo's read-only method list: ``_method_rows``' box with every method
-    disabled, ticked where it was computed for the pair."""
+    disabled, ticked where it was computed for the pair output."""
     st.sidebar.markdown(
         "<div class='spatialaim-group-label'>Computed mapping methods</div>",
         unsafe_allow_html=True,
@@ -652,7 +669,7 @@ def _demo_method_rows(computed: list[str], pair_id: int) -> None:
             MAPPER_LABELS.get(m, m),
             value=m in computed,
             disabled=True,
-            key=f"demo_method_{m}_{pair_id}",
+            key=f"demo_method_{m}_{view_key}",
         )
 
 

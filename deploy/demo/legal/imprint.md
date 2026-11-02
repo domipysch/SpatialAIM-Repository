@@ -3,9 +3,10 @@
 ## Information pursuant to § 5 DDG
 
 Dominik Pysch\
-Biomedical Network Science Lab\
-Department Artificial Intelligence in Biomedical Engineering\
-Friedrich-Alexander-Universität Erlangen-Nürnberg\
+[Biomedical Network Science Lab](https://www.bionets.tf.fau.de/)\
+[Department Artificial Intelligence in Biomedical Engineering](https://www.aibe.tf.fau.de/)\
+[Friedrich-Alexander-Universität Erlangen-Nürnberg](https://www.fau.de)
+
 Nürnberger Str. 74\
 91052 Erlangen\
 Germany

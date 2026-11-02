@@ -27,11 +27,13 @@ from pathlib import Path
 PRIMARY_COLOR = "#1c83e1"
 
 # The demo is a public server: no file watcher or rerun-on-save, no developer
-# menu, no uploads, and no detailed error pages.
+# menu, no uploads, no detailed error pages, and no cookie (the XSRF token only
+# guards uploads, which the demo has none of).
 _DEMO_FLAGS = [
     "--server.fileWatcherType", "none",
     "--server.runOnSave", "false",
     "--server.maxUploadSize", "1",
+    "--server.enableXsrfProtection", "false",
     "--server.enableStaticServing", "true",
     "--client.toolbarMode", "viewer",
     "--client.showErrorDetails", "none",

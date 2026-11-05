@@ -67,22 +67,18 @@ def _n_finished(start: data_access.Start) -> int:
     )
 
 
-def _pages(
-    ctx: ViewContext, disk_starts: list[data_access.Start], landing: str | None = None
-) -> list:
-    """The navigation's pages. The Overview and Reference join once a sweep has
-    finished, Compare once one start has two finished methods; the landing page
-    is the Overview then, before that Explore (which shows the progress of a
-    running sweep). ``landing="explore"`` always lands on Explore."""
+def _pages(ctx: ViewContext, disk_starts: list[data_access.Start]) -> list:
+    """The navigation's pages, landing on Explore (which also shows the progress
+    of a running sweep). The Overview and Reference join once a sweep has
+    finished, Compare once one start has two finished methods."""
     per_start = [_n_finished(s) for s in disk_starts]
     n_finished = sum(per_start)
-    explore_first = landing == "explore" or n_finished == 0
     explore = st.Page(
         lambda: explore_page(ctx),
         title="Explore",
         icon=":material/travel_explore:",
         url_path="explore",
-        default=explore_first,
+        default=True,
     )
 
     def _open(start: data_access.Start, mapper: str) -> None:
@@ -97,7 +93,6 @@ def _pages(
                 title="Overview",
                 icon=":material/leaderboard:",
                 url_path="overview",
-                default=not explore_first,
             )
         )
     pages.append(explore)
@@ -133,7 +128,7 @@ def demo_main() -> None:
         pages = [st.Page(demo.no_data_view, title="SpatialAIM", default=True)]
     else:
         starts = data_access.list_starts(settings.pair_dir)
-        pages = _pages(ViewContext(settings, {}, [], starts), starts, landing="explore")
+        pages = _pages(ViewContext(settings, {}, [], starts), starts)
     nav = st.navigation([*pages, *legal], position="top")
     render_sidebar_footer(legal)
     nav.run()

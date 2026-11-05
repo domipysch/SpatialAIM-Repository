@@ -1,7 +1,7 @@
 """
 The cell-type modal, opened by a right click on a cell type in a headline or
-reference plot: the type's name, its maps, and the "General", "Gene expression"
-and (with a segmentation) "Shape features" views.
+reference plot: the type's name, its maps, and the "Gene expression", (with a
+segmentation) "Shape features" and "General" views.
 """
 
 from __future__ import annotations
@@ -77,11 +77,11 @@ _MARKER_LISTS = {
     "down_st": ("↓ Downregulated · ST", True, "down"),
 }
 
-# The modal's views, picked in its left bar: key -> (label, icon). "genes" lists
-# the marker genes beneath it.
+# The modal's views, in switch order around the optional "shape": key -> (label,
+# icon). "genes" lists the marker genes beneath it.
 _CTDLG_VIEWS = {
-    "general": ("General", ":material/insights:"),
     "genes": ("Gene expression", ":material/genetics:"),
+    "general": ("General", ":material/insights:"),
 }
 
 
@@ -98,10 +98,10 @@ def _cell_type_dialog_body(
     plot). A header row of two cards: a name field for the type (the same names
     the "Set cell type names" dialog edits) beside the type highlighted on the
     all-gene reference UMAP (and, in a mapper tab, the spatial map). Below, a
-    switch of views -- "General" (selected on opening,
-    ``_cell_type_general_view``), "Gene expression", whose marker-gene list
-    (``_cell_type_gene_list``) sits in a card left of its plots, and, with a
-    segmentation, "Shape features" -- each drawn as cards over the full width."""
+    switch of views -- "Gene expression" (selected on opening), whose
+    marker-gene list (``_cell_type_gene_list``) sits in a card left of its plots,
+    with a segmentation "Shape features", and "General"
+    (``_cell_type_general_view``) -- each drawn as cards over the full width."""
     # "large" is too narrow for two UMAPs beside the gene list; widen only this
     # dialog (matched through the keyed container inside it).
     st.html(
@@ -120,11 +120,12 @@ def _cell_type_dialog_body(
     gene_key = f"ctdlg_gene_{root.name}_{k}_{state}"
     # The shape view only exists for a mapping whose sweep had a segmentation.
     shape = shape_features(root) if spatial is not None else None
-    views = dict(_CTDLG_VIEWS)
+    views = {"genes": _CTDLG_VIEWS["genes"]}
     if shape is not None:
         views["shape"] = ("Shape features", ":material/pentagon:")
+    views["general"] = _CTDLG_VIEWS["general"]
     if st.session_state.get(view_key) not in views:
-        st.session_state[view_key] = "general"
+        st.session_state[view_key] = "genes"
     view = st.session_state[view_key]
 
     def _show(v: str, g: str | None = None) -> None:
@@ -164,7 +165,7 @@ def _cell_type_dialog_body(
             )
 
         # The view switch is keyed on ``view_key`` itself; deselecting the
-        # current view leaves None, which the check above turns into "general".
+        # current view leaves None, which the check above turns into "genes".
         with st.container(key="ctdlg_switch"):
             st.segmented_control(
                 "View",

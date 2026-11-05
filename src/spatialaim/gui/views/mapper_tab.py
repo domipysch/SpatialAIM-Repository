@@ -21,6 +21,7 @@ from spatialaim.gui.views.cards import export_popover, plot_card
 from spatialaim.gui.views.cell_type_modal import open_cell_type_dialog, reopened_state
 from spatialaim.gui.views.choose_k import render_choose_k
 from spatialaim.gui.views.controls import Controls
+from spatialaim.gui.views.gene_modal import open_gene_dialog
 from spatialaim.gui.views.report import render_report
 from spatialaim.gui.widgets.headline_plot import headline_plot
 from spatialaim.gui.widgets.slider import live_slider
@@ -42,8 +43,10 @@ def _headline(
     conf_controls: bool = False,
     threshold: float = 0.0,
     plot_confidence: bool = False,
+    inspect_genes: bool = False,
 ) -> None:
-    """UMAP(s) + live spatial plot sharing one state legend.
+    """UMAP(s) + live spatial plot sharing one state legend; ``inspect_genes``
+    adds the "Inspect genes" button below them.
 
     When ``conf_controls`` is set and the mapper wrote per-spot confidence, the
     confidence-threshold slider and the "Plot confidence" checkbox are rendered
@@ -131,25 +134,31 @@ def _headline(
         menu_state = headline_plot(fig, key=origin, context_menu=adata_sc is not None)
         if menu_state is None:
             menu_state = reopened_state(origin, k)
-        if menu_state is not None and adata_sc is not None:
-            # The reference aligners write no confidence; as in the report's
-            # confidence card, their soft mapping's max per spot stands in.
-            spatial = (
-                SpatialContext(
-                    str(args.stdata),
-                    hard,
-                    coords,
-                    confidence if have_conf else _P.max(axis=1),
-                    "Confidence" if have_conf else "Max probability",
-                )
-                if have_spatial and len(hard) == len(coords)
-                else None
+        # The reference aligners write no confidence; as in the report's
+        # confidence card, their soft mapping's max per spot stands in.
+        spatial = (
+            SpatialContext(
+                str(args.stdata),
+                hard,
+                coords,
+                confidence if have_conf else _P.max(axis=1),
+                "Confidence" if have_conf else "Max probability",
             )
+            if have_spatial and len(hard) == len(coords)
+            else None
+        )
+        if menu_state is not None and adata_sc is not None:
             open_cell_type_dialog(
                 adata_sc, root, k, menu_state, args.output_dir, spatial, origin=origin
             )
         if adata_sc is not None:
             st.caption(_PLOT_CLICK_HINT)
+            if inspect_genes and st.button(
+                "Inspect genes",
+                icon=":material/genetics:",
+                key=f"{key_prefix}_inspect_genes",
+            ):
+                open_gene_dialog(adata_sc, root, k, spatial)
         # stem carries the figure identity (K + threshold + confidence toggle) so
         # the export cache invalidates when any of them changes (see export_popover).
         stem = f"{key_prefix}_k{k:03d}_thr{int(round(threshold * 100)):03d}"
@@ -312,6 +321,7 @@ def mapper_tab(
         key_prefix=f"tab_{mapper}",
         show_shared_umap=ctrl.show_shared_umap,
         conf_controls=True,
+        inspect_genes=True,
     )
 
     st.divider()

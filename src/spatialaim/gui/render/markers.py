@@ -102,7 +102,7 @@ def _rank_markers(X, labels: np.ndarray, genes: list[str]) -> dict | None:
     }
 
 
-def _shared_genes(adata_sc: AnnData) -> list[str]:
+def shared_genes(adata_sc: AnnData) -> list[str]:
     """The scaffold's shared genes (scRNA ∩ ST), in their stored order."""
     shared = list(adata_sc.uns.get(UNS_SHARED_GENES, []))
     return [g for g in shared if g in adata_sc.var_names]
@@ -122,7 +122,7 @@ def _state_markers(_adata_sc, root_str: str, k: int):
     )
     infer_cell_to_state_cluster(_adata_sc, start_cluster_to_state)
     cell_states = _adata_sc.obs[OBS_COMPUTED_STATE].astype(int).to_numpy()
-    genes = _shared_genes(_adata_sc)
+    genes = shared_genes(_adata_sc)
     if len(genes) < 2:
         return None
     return _rank_markers(_adata_sc[:, genes].layers[LAYER_LOGNORM], cell_states, genes)
@@ -146,7 +146,7 @@ def _spatial_state_markers(_adata_sc, _hard, root_str: str, k: int, st_path_str:
     ``None`` when the ranking is impossible or the assignment does not match the
     ST file's spots. Cached on ``(root, k, st_path)``, which fix ``_hard``.
     """
-    genes = _shared_genes(_adata_sc)
+    genes = shared_genes(_adata_sc)
     if len(genes) < 2:
         return None
     X = _spatial_lognorm(st_path_str, tuple(genes))
@@ -287,7 +287,7 @@ def spatial_gene_expression(
 ) -> np.ndarray | None:
     """Per-spot ST lognorm expression of ``gene``, or ``None`` if it is not a
     shared gene."""
-    genes = _shared_genes(adata_sc)
+    genes = shared_genes(adata_sc)
     if gene not in genes:
         return None
     X = _spatial_lognorm(spatial.st_path, tuple(genes))

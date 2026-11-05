@@ -36,8 +36,11 @@ COPY deploy/demo/legal ./legal
 
 RUN useradd --create-home --uid 10001 spatialaim
 USER spatialaim
-# numba (via scanpy/umap) caches compiled code next to the sources by default.
-ENV NUMBA_CACHE_DIR=/tmp/numba \
+# The container runs read-only with only /tmp writable: numba (via scanpy/umap)
+# caches compiled code next to the sources by default, and anything else that
+# writes to the home folder (~/.streamlit, ~/.cache) lands in /tmp too.
+ENV HOME=/tmp \
+    NUMBA_CACHE_DIR=/tmp/numba \
     MPLCONFIGDIR=/tmp/matplotlib
 
 EXPOSE 8501

@@ -228,9 +228,10 @@ def add_violin(
     rng,
     *,
     col: int,
+    row: int = 1,
     expressing: bool = True,
 ) -> None:
-    """One violin (box + mean line) of ``vals`` in subplot column ``col``, with
+    """One violin (box + mean line) of ``vals`` in subplot ``row``/``col``, with
     the group's size and (``expressing``: for expression values) fraction of
     non-zero values under its label."""
     if vals.size == 0:
@@ -262,6 +263,6 @@ def add_violin(
             showlegend=False,
             hoverinfo="y",
         ),
-        row=1,
+        row=row,
         col=col,
     )

@@ -268,6 +268,56 @@ def render_gene_distribution_figure(
     return base_layout(fig, height=360, margin=dict(l=10, r=10, t=40, b=10))
 
 
+def render_gene_by_type_figure(
+    adata_sc: AnnData,
+    root: Path,
+    k: int,
+    gene: str,
+    *,
+    spatial: SpatialContext | None = None,
+) -> go.Figure:
+    """Violins of ``gene``'s lognorm expression per cell type at ``k``: one row
+    for the reference cells and, with ``spatial``, one for the spots grouped by
+    their hard assignment, each on its own y-axis."""
+    data = umap_panel_data(adata_sc, str(root), int(k), OBSM_UMAP, False)
+    names = names_for(root, k)
+    palette = state_palette(k)
+    st_expr = (
+        spatial_gene_expression(adata_sc, spatial, gene)
+        if spatial is not None
+        else None
+    )
+    expr = gene_expression(adata_sc, str(root), gene)
+    groups = [("scRNA reference cells", data["states"], expr)]
+    if st_expr is not None:
+        groups.append(("Cells of spatial data", np.asarray(spatial.hard), st_expr))
+    fig = make_subplots(
+        rows=len(groups),
+        cols=1,
+        subplot_titles=[g[0] for g in groups],
+        vertical_spacing=0.18,
+    )
+    rng = np.random.default_rng(0)
+    for row, (_title, states, expr) in enumerate(groups, start=1):
+        for s in range(k):
+            vals = expr[states == s]
+            if vals.size == 0:
+                continue
+            add_violin(
+                fig,
+                vals,
+                state_label(s, names),
+                hex_color(palette.get(s)),
+                rng,
+                col=1,
+                row=row,
+            )
+        fig.update_yaxes(title_text=f"{gene} (lognorm)", row=row, col=1)
+    return base_layout(
+        fig, height=380 * len(groups), margin=dict(l=10, r=10, t=40, b=10)
+    )
+
+
 def render_state_confidence_figure(
     root: Path, k: int, state: int, spatial: SpatialContext
 ) -> go.Figure:

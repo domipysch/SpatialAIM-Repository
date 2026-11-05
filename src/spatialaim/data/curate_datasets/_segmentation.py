@@ -300,7 +300,8 @@ def extract_remote_zip_members(
         info = next(
             i
             for i in archive.infolist()
-            if i.filename.endswith("/" + name) and "__MACOSX" not in i.filename
+            if (i.filename == name or i.filename.endswith("/" + name))
+            and "__MACOSX" not in i.filename
         )
         logger.info(
             "  extract %s (%.0f MB compressed) from %s",

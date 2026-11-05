@@ -68,7 +68,7 @@ workflow run). The pages are linked from the sidebar footer on every page (`/imp
 ## 4. Run
 
 ```bash
-docker run -d --name spatialaim-demo --restart unless-stopped -p 127.0.0.1:8501:8501 -v /srv/spatialaim-demo/data:/data:ro --read-only --tmpfs /tmp --tmpfs /home/spatialaim --memory 16g --cpus 4 ghcr.io/domipysch/spatialaim-demo:latest
+docker run -d --name spatialaim-demo --restart unless-stopped -p 127.0.0.1:8501:8501 -v /testmount2/zi69hebi/spatialaim-demo/data:/data:ro --read-only --tmpfs /tmp --memory 16g --cpus 4 ghcr.io/domipysch/spatialaim-demo:latest
 ```
 
 The container serves plain HTTP on port 8501; `127.0.0.1:` keeps it reachable only for the

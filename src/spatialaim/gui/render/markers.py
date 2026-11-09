@@ -7,6 +7,7 @@ it; plus the per-gene expression lookups the cell-type modal plots.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from pathlib import Path
 
 import numpy as np
@@ -315,6 +316,7 @@ def render_state_markers_figure(
     *,
     n_genes: int = 5,
     spatial: SpatialContext | None = None,
+    marker_types: Collection[int] | None = None,
 ) -> go.Figure | None:
     """Dotplot of each computed cell type's top ``n_genes`` marker genes
     (``rank_genes_groups``, Wilcoxon vs. rest, shared genes), in the style of
@@ -325,8 +327,10 @@ def render_state_markers_figure(
     Dot area = fraction of the row's cells expressing the gene; dot colour = the
     row's mean lognorm expression, min-max scaled per gene across rows. With
     ``spatial`` the same plot is drawn for the ST spots, grouped by this mapper's
-    hard assignment (``_spatial_state_markers``). Returns ``None`` when the
-    ranking is unavailable (see ``_state_markers``).
+    hard assignment (``_spatial_state_markers``). ``marker_types`` keeps only
+    those types' rows and marker columns; the colour stays scaled across all
+    types, so a lone row keeps its contrast. Returns ``None`` when the ranking
+    is unavailable (see ``_state_markers``) or no column is left.
     """
     mk = _markers(adata_sc, root, k, spatial)
     if mk is None:
@@ -340,10 +344,14 @@ def render_state_markers_figure(
     col_genes: list[int] = []
     blocks: list[tuple[int, int, int]] = []  # (state, first col, last col)
     for s in states:
+        if marker_types is not None and s not in marker_types:
+            continue
         cols = mk["ranked"].get(s, [])[:n_genes]
         if cols:
             blocks.append((s, len(col_genes), len(col_genes) + len(cols) - 1))
             col_genes += cols
+    if not col_genes:
+        return None
     gcols = np.asarray(col_genes)
 
     mean = mk["mean"][:, gcols]
@@ -351,6 +359,16 @@ def render_state_markers_figure(
     span = np.where(hi > lo, hi - lo, 1.0)
     scaled = (mean - lo) / span
     frac = mk["frac"][:, gcols]
+    score = mk["score"][:, gcols]
+    padj = mk["padj"][:, gcols]
+
+    # Rows: the shown types only (scaled above over all of them).
+    keep = np.asarray(
+        [marker_types is None or s in marker_types for s in states], dtype=bool
+    )
+    states = [s for s, kept in zip(states, keep) if kept]
+    mean, scaled, frac = mean[keep], scaled[keep], frac[keep]
+    score, padj = score[keep], padj[keep]
 
     row_labels = [
         f'<span style="color:{hex_color(palette.get(s))};font-size:22px">●</span>'
@@ -366,8 +384,8 @@ def render_state_markers_figure(
     custom[:, 1] = np.tile([genes[j] for j in col_genes], n_rows)
     custom[:, 2] = frac.ravel()
     custom[:, 3] = mean.ravel()
-    custom[:, 4] = mk["score"][:, gcols].ravel()
-    custom[:, 5] = mk["padj"][:, gcols].ravel()
+    custom[:, 4] = score.ravel()
+    custom[:, 5] = padj.ravel()
 
     fig = go.Figure()
     fig.add_trace(

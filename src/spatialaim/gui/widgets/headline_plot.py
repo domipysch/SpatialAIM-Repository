@@ -6,6 +6,8 @@ selection handled in the browser, without reruns.
 * double click -> isolate that state (or, if already isolated, restore all)
 * right click (with ``context_menu``) -> report the state to Python, which opens
   the cell-type modal
+* with ``report_k``, every change of the shown states is reported to Python
+  (state value ``active``, tagged with that K), which reruns the caller
 
 Inactive states are recoloured to one light grey rather than hidden, so
 overlapping points never stack into odd shades. State traces are matched by
@@ -18,6 +20,8 @@ inline error instead of the plot.
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping
 
 import streamlit as st
 
@@ -33,7 +37,7 @@ const stateOf = (tr) => {
 }
 
 export default async function (component) {
-  const { parentElement, data, key, setTriggerValue } = component
+  const { parentElement, data, key, setTriggerValue, setStateValue } = component
 
   let gd = parentElement.querySelector(".spatialaim-gd")
   if (!gd) {
@@ -160,17 +164,34 @@ export default async function (component) {
     }
   }
 
+  // With reportK, Python sees the shown states as {k, active}; a report of
+  // another K counts as "all shown" on both sides, so a K change needs no push.
+  const reportK = data.reportK === undefined ? null : data.reportK
+  const sortedActive = () => Array.from(store[key].active).sort((a, b) => a - b)
+  const report = () => {
+    if (reportK !== null) setStateValue("active", { k: reportK, active: sortedActive() })
+  }
+  // Re-sync when Python's view differs from ours (e.g. K left and re-entered,
+  // which resets ours to all while Python still holds the earlier selection).
+  if (reportK !== null) {
+    const r = data.reported
+    const seen = r && r.k === reportK ? r.active.join(",") : states.join(",")
+    if (seen !== sortedActive().join(",")) report()
+  }
+
   const toggle = (s) => {
     const a = store[key].active
     if (a.has(s)) a.delete(s)
     else a.add(s)
     applyColors()
+    report()
   }
   const isolate = (s) => {
     const a = store[key].active
     if (a.size === 1 && a.has(s)) store[key].active = new Set(states)
     else store[key].active = new Set([s])
     applyColors()
+    report()
   }
 
   applyColors()
@@ -302,15 +323,27 @@ _HEADLINE_PLOT = st.components.v2.component(
 
 
 def headline_plot(
-    fig, key: str, *, off_color: str = "#dcdcdc", context_menu: bool = False
-) -> int | None:
+    fig,
+    key: str,
+    *,
+    off_color: str = "#dcdcdc",
+    context_menu: bool = False,
+    report_k: int | None = None,
+) -> tuple[int | None, frozenset[int] | None]:
     """Render ``fig`` (a Plotly figure) with client-side state toggle/isolate.
 
     ``off_color`` is the single light-gray colour used for every deactivated
-    state. With ``context_menu`` a right click on a state's point or legend entry
-    reruns the script and returns that state (else ``None``) -- the caller opens
-    the cell-type modal for it.
+    state. Returns ``(menu_state, active)``. With ``context_menu`` a right click
+    on a state's point or legend entry reruns the script and returns that state
+    as ``menu_state`` (else ``None``) -- the caller opens the cell-type modal for
+    it. With ``report_k`` (the figure's K) every toggle reruns the script and
+    ``active`` is the set of shown states; ``None`` means all are shown (also
+    without ``report_k``, or while the last report is of another K).
     """
+    # The last report, mirrored so the component can tell whether Python's view
+    # still matches its own (see the re-sync in the JS).
+    mirror = f"_{key}_active"
+    reported = st.session_state.get(mirror) if report_k is not None else None
     result = _HEADLINE_PLOT(
         key=key,
         data={
@@ -318,11 +351,23 @@ def headline_plot(
             "offColor": off_color,
             "contextMenu": context_menu,
             "plotlyUrl": demo.plotly_url(),
+            "reportK": report_k,
+            "reported": reported,
         },
         on_menu_state_change=lambda: None,
+        on_active_change=lambda: None,
     )
     value = getattr(result, "menu_state", None)
     try:
-        return None if value is None else int(value)
+        menu_state = None if value is None else int(value)
     except (TypeError, ValueError):
-        return None
+        menu_state = None
+    active = getattr(result, "active", None) if report_k is not None else None
+    if isinstance(active, Mapping):
+        st.session_state[mirror] = dict(active)
+    shown = (
+        frozenset(int(s) for s in active["active"])
+        if isinstance(active, Mapping) and active.get("k") == report_k
+        else None
+    )
+    return menu_state, shown

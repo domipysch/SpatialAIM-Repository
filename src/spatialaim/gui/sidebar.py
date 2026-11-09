@@ -596,11 +596,21 @@ def _render_demo_sidebar() -> argparse.Namespace | None:
         "advance. Choosing another pair resets the result pages.",
     )
     pair = by_id[pair_id]
-    details = " · ".join(x for x in (pair.tissue, pair.author) if x)
-    if pair.source:
-        details += f" · [source]({pair.source})"
+    # scRNA × ST authors; once when both sides come from the same authors.
+    authors = list(dict.fromkeys(a for a in (pair.author, pair.st_author) if a))
+    details = " · ".join(x for x in (pair.tissue, " × ".join(authors)) if x)
     if details:
         st.sidebar.caption(details)
+    links = [
+        f"{side} " + " · ".join(f"[{text}]({url})" for text, url in parts if url)
+        for side, parts in (
+            ("scRNA:", (("paper", pair.sc_paper), ("data", pair.sc_data))),
+            ("ST:", (("paper", pair.st_paper), ("data", pair.st_data))),
+        )
+        if any(url for _, url in parts)
+    ]
+    if links:
+        st.sidebar.caption(" &nbsp;|&nbsp; ".join(links))
 
     st.sidebar.divider()
     st.sidebar.subheader("2. Method")

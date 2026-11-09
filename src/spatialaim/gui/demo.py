@@ -80,7 +80,11 @@ class DemoPair(NamedTuple):
     outputs: dict[str, Path]  # linkage -> pair output, LINKAGE_METHODS order
     tissue: str
     author: str
-    source: str
+    st_author: str
+    sc_paper: str
+    sc_data: str
+    st_paper: str
+    st_data: str
     name: str
 
     @property
@@ -117,6 +121,12 @@ def _index(path: Path) -> dict[str, dict[str, str]]:
         return {row["Name"]: row for row in csv.DictReader(fh)}
 
 
+def _first_url(cell: str | None) -> str:
+    """The first http(s) URL of an index cell (``Links`` may hold several,
+    space-separated); empty without one."""
+    return next((t for t in (cell or "").split() if t.startswith("http")), "")
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def list_pairs() -> list[DemoPair]:
     """The pairs of ``datasets/pairs.csv`` whose inputs and results exist."""
@@ -141,6 +151,7 @@ def list_pairs() -> list[DemoPair]:
         mask = (st_index.get(st_name) or {}).get("Segmentation", "").strip()
         seg = DATASETS_DIR / "ST" / "Segmentation" / mask if mask else None
         sc_row = sc_index.get(sc_name) or {}
+        st_row = st_index.get(st_name) or {}
         pairs.append(
             DemoPair(
                 pair_id,
@@ -152,7 +163,11 @@ def list_pairs() -> list[DemoPair]:
                 outputs,
                 sc_row.get("Tissue", ""),
                 sc_row.get("Autor", ""),
-                sc_row.get("Quelle", ""),
+                st_row.get("Autor", ""),
+                _first_url(sc_row.get("Quelle")),
+                _first_url(sc_row.get("Links")),
+                _first_url(st_row.get("Quelle")),
+                _first_url(st_row.get("Links")),
                 (row.get("Name") or "").strip(),
             )
         )

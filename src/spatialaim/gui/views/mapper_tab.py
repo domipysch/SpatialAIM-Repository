@@ -44,9 +44,12 @@ def _headline(
     threshold: float = 0.0,
     plot_confidence: bool = False,
     inspect_genes: bool = False,
-) -> None:
+    report_selection: bool = False,
+) -> frozenset[int] | None:
     """UMAP(s) + live spatial plot sharing one state legend; ``inspect_genes``
-    adds the "Inspect genes" button below them.
+    adds the "Inspect genes" button below them. With ``report_selection`` every
+    left-click toggle reruns the tab and the shown cell types are returned
+    (``None`` = all, or without it).
 
     When ``conf_controls`` is set and the mapper wrote per-spot confidence, the
     confidence-threshold slider and the "Plot confidence" checkbox are rendered
@@ -101,7 +104,7 @@ def _headline(
     if coords is None and adata_sc is None:
         with plot_slot:
             st.info("Nothing to plot: no spatial coords and no UMAP scaffold.")
-        return
+        return None
 
     try:
         fig = render_headline_figure(
@@ -131,7 +134,14 @@ def _headline(
         )
     with plot_slot:
         origin = f"{key_prefix}_headline"
-        menu_state = headline_plot(fig, key=origin, context_menu=adata_sc is not None)
+        menu_state, shown = headline_plot(
+            fig,
+            key=origin,
+            context_menu=adata_sc is not None,
+            report_k=k if report_selection else None,
+        )
+        if shown is not None and shown >= set(range(k)):
+            shown = None  # all shown: no filter
         if menu_state is None:
             menu_state = reopened_state(origin, k)
         # The reference aligners write no confidence; as in the report's
@@ -168,13 +178,20 @@ def _headline(
 
     if coords is None:
         st.caption("ST data has no obsm['spatial'] — no spatial plot.")
+    return shown
 
 
 def _state_markers_card(
-    mapper: str, root: Path, k: int, args: argparse.Namespace
+    mapper: str,
+    root: Path,
+    k: int,
+    args: argparse.Namespace,
+    marker_types: frozenset[int] | None = None,
 ) -> None:
     """The reference tab's marker-gene dotplot, drawn for the ST spots grouped
-    by this mapper's hard assignment at ``k``."""
+    by this mapper's hard assignment at ``k``, plus the reference's for
+    comparison. ``marker_types`` (the cell types shown in the headline plot)
+    keeps only their rows and marker columns in both."""
     with st.expander("Assigned cell type marker genes (ST)", expanded=False):
         adata_sc = load_scaffold(args, warn="Scaffold build failed — no marker genes")
         if adata_sc is None:
@@ -191,14 +208,28 @@ def _state_markers_card(
             "rest, on the ST lognorm).",
         )
         _P, hard, _conf = load_soft(str(root), k)
+        # The selection is part of the export stem, so the cache follows it.
+        sel = (
+            ""
+            if marker_types is None
+            else "_types" + "-".join(str(s) for s in sorted(marker_types))
+        )
+        if marker_types is not None:
+            st.caption(
+                "Only the cell types shown in the plot above; "
+                "left click there to change the selection."
+            )
         fig_mk = render_state_markers_figure(
             adata_sc,
             root,
             k,
             n_genes=int(n_genes),
             spatial=SpatialContext(str(args.stdata), hard, None),
+            marker_types=marker_types,
         )
-        if fig_mk is None:
+        if fig_mk is None and marker_types is not None:
+            st.info("No marker genes for the selected cell types.")
+        elif fig_mk is None:
             st.info(
                 "Marker genes need at least two shared genes and two assigned "
                 "cell types with two or more spots each, and the mapping must "
@@ -208,7 +239,7 @@ def _state_markers_card(
             plot_card(
                 fig_mk,
                 key=f"tab_{mapper}_markers",
-                stem=f"{mapper}_st_marker_genes_k{k:03d}_n{int(n_genes)}",
+                stem=f"{mapper}_st_marker_genes_k{k:03d}_n{int(n_genes)}{sel}",
                 caption="Spots grouped by their hard assignment (argmax of the "
                 "soft mapping). Dot size: fraction of the cell type's spots "
                 "expressing the gene. Colour: mean ST lognorm expression, scaled "
@@ -218,7 +249,12 @@ def _state_markers_card(
 
         # The reference tab's card, for direct comparison (same K and gene count).
         st.markdown("**Reference (scRNA) for comparison**")
-        fig_ref = render_state_markers_figure(adata_sc, root, k, n_genes=int(n_genes))
+        fig_ref = render_state_markers_figure(
+            adata_sc, root, k, n_genes=int(n_genes), marker_types=marker_types
+        )
+        if fig_ref is None and marker_types is not None:
+            st.info("No marker genes for the selected cell types.")
+            return
         if fig_ref is None:
             st.info(
                 "Marker genes need at least two shared genes and two cell types "
@@ -228,7 +264,7 @@ def _state_markers_card(
         plot_card(
             fig_ref,
             key=f"tab_{mapper}_ref_markers",
-            stem=f"reference_marker_genes_k{k:03d}_n{int(n_genes)}",
+            stem=f"reference_marker_genes_k{k:03d}_n{int(n_genes)}{sel}",
             caption="Dot size: fraction of the cell type's cells expressing the "
             "gene. Colour: mean lognorm expression, scaled 0–1 per gene across "
             "cell types. Hover for the Wilcoxon score and adjusted p-value.",
@@ -313,7 +349,7 @@ def mapper_tab(
     st.markdown("<div style='height:0.9rem'></div>", unsafe_allow_html=True)
     render_choose_k(mapper, root, ks_all, current_k=ctrl.k)
 
-    _headline(
+    shown = _headline(
         mapper,
         root,
         ctrl.k,
@@ -322,10 +358,11 @@ def mapper_tab(
         show_shared_umap=ctrl.show_shared_umap,
         conf_controls=True,
         inspect_genes=True,
+        report_selection=True,
     )
 
     st.divider()
-    _state_markers_card(mapper, root, ctrl.k, args)
+    _state_markers_card(mapper, root, ctrl.k, args, marker_types=shown)
 
     st.divider()
     st.subheader("Report")

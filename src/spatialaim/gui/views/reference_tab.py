@@ -117,7 +117,7 @@ def reference_tab(mappers: list[str], args: argparse.Namespace, ctrl: Controls) 
         return
 
     fig_umaps = render_reference_umaps_figure(adata_sc, ref_root, ctrl.k)
-    menu_state = headline_plot(fig_umaps, key="ref_umaps", context_menu=True)
+    menu_state, _shown = headline_plot(fig_umaps, key="ref_umaps", context_menu=True)
     if menu_state is None:
         menu_state = reopened_state("ref_umaps", ctrl.k)
     if menu_state is not None:

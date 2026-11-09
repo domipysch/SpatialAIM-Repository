@@ -35,9 +35,9 @@ kept in metadata order: P2 41933 -> 35673, P5 24615 -> 23823.
 
 Curation:
   * obs  index = the authors' ``Barcode``; ``Level1`` and ``Level2`` verbatim.
-           Level2 is **not nested** in Level1 (e.g. Level1 "B cells" holds
-           Level2 "Plasma" and "vSM"): both come from separate clusterings and
-           are kept as published.
+           Level2 was sub-clustered within Level1 on a 15 % sketch and then
+           extended to all cells, so it is only mostly nested (P2: 3.8 % of
+           cells sit outside their Level2's main Level1); kept as published.
   * X    = the four matrices' columns for those barcodes, float32
   * var  index = gene symbols uppercased; three symbols occur twice and are
            summed onto the first occurrence, 18082 -> 18079

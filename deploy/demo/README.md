@@ -78,6 +78,12 @@ say so.
 
 Health: `docker ps` shows the status of the image's healthcheck on `/_stcore/health`.
 
+### Check via SSH port forwarding
+
+```bash
+ssh -N -L 8501:127.0.0.1:8501 <user>@<server>
+```
+
 ## 5. Sizing and limits
 
 - All visitors share one Python process. The reference scaffold (the largest object) is cached

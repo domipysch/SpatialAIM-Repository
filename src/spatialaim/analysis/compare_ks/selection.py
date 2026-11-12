@@ -7,14 +7,15 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .criteria import CRITERIA
+from .criteria import CRITERIA, SCATTER_PAIRS
 from .scoring import column_values, overall
 
 
 def best_ks(table: pd.DataFrame) -> dict[str, tuple[int, float] | None]:
-    """The best ``(k, score)`` overall and per criterion, as
-    ``{"overall": ..., "<criterion key>": ...}``; ``None`` for a criterion
-    without any finite score."""
+    """The best ``(k, score)`` overall, per criterion and per pair of criteria,
+    as ``{"overall": ..., "<criterion key>": ..., "<key a>+<key b>": ...}``.
+    A pair's score is the harmonic mean of its two criterion scores, as
+    ``overall`` is of all three. ``None`` where no K has a finite score."""
     out: dict[str, tuple[int, float] | None] = {
         "overall": _best_k(table, overall(table))
     }
@@ -23,6 +24,8 @@ def best_ks(table: pd.DataFrame) -> dict[str, tuple[int, float] | None]:
             dtype=float
         )
         out[criterion.key] = _best_k(table, values)
+    for a, b in SCATTER_PAIRS:
+        out[f"{a}+{b}"] = _best_k(table, overall(table, (a, b)))
     return out
 
 

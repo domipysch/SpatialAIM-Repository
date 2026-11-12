@@ -26,7 +26,7 @@ class Criterion:
 CRITERIA: tuple[Criterion, ...] = (
     Criterion(
         key="recon",
-        label="Reconstruction cossim",
+        label="Reconstruction fidelity",
         short="Reconstruction",
         columns=("cossim_hard_raw_spot", "cossim_hard_raw_gene"),
         curve_labels=("raw · spot", "raw · gene"),

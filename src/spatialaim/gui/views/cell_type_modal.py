@@ -233,7 +233,7 @@ def _cell_type_gene_list(
     options = ["up", "up_st", "down", "down_st"] if spatial else ["up", "down"]
     # Name the source on every entry once there are two of them.
     labels = {
-        key: (lab if spatial is None or from_st else lab + " · scRNA")
+        key: (lab if spatial is None or from_st else lab + " · scRNA-seq")
         for key, (lab, from_st, _d) in _MARKER_LISTS.items()
     }
     st.markdown("**Marker genes**")

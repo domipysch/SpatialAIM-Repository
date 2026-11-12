@@ -21,10 +21,13 @@ from spatialaim.analysis.loading import (
 from spatialaim.gui import data_access
 from spatialaim.gui.render.common import (
     STATE_LEGEND,
+    TAB20,
     SpatialContext,
+    hex_color,
     base_layout,
     names_for,
     state_palette,
+    style_scatter_axes,
 )
 from spatialaim.gui.render.markers import top_genes_per_state
 from spatialaim.gui.render.scatter import (
@@ -196,6 +199,123 @@ def render_headline_figure(
         fig,
         height=720,
         legend={**STATE_LEGEND, "y": 1.12},
+        margin=dict(l=10, r=10, t=70, b=10),
+    )
+
+
+def render_annotation_figure(
+    adata_sc: AnnData,
+    labels: np.ndarray,
+    annotation: str,
+    *,
+    coords: np.ndarray | None = None,
+    st_labels: np.ndarray | None = None,
+    show_shared_umap: bool = False,
+    reference_layout: bool = False,
+    colors: dict[str, str] | None = None,
+    dot_size: float = 3.0,
+) -> go.Figure:
+    """The annotation ``labels`` (one per scaffold cell) on the reference UMAP(s)
+    and, given ``coords`` and ``st_labels``, the annotation start's identity-cut
+    mapping on the spatial map. Independent of K; one colour per annotated type
+    across all panels (sorted type order, as the annotation start numbers them).
+
+    With ``reference_layout`` the panels line up under
+    ``render_reference_umaps_figure``: an empty first column (under the start
+    clustering), then the all-gene and the shared-gene UMAP, at its height.
+
+    ``colors`` (type -> hex) overrides the default tab20-by-type colours; a type
+    it leaves out is drawn grey."""
+    types = sorted(
+        set(labels.tolist()) | set([] if st_labels is None else st_labels.tolist())
+    )
+    if colors is None:
+        colors = {t: TAB20[i % 20] for i, t in enumerate(types)}
+    else:
+        colors = {t: hex_color(colors.get(t)) for t in types}
+    have_shared = OBSM_UMAP_SHARED_GENES in adata_sc.obsm
+    all_gene = (
+        f"Reference UMAP — {annotation}",
+        np.asarray(adata_sc.obsm[OBSM_UMAP]),
+        labels,
+        False,
+    )
+    # ``None`` = an empty column (reference layout only).
+    panels: list[tuple[str, np.ndarray, np.ndarray, bool] | None] = []
+    if reference_layout:
+        panels = [None, all_gene]
+        if have_shared:
+            panels.append(
+                (
+                    f"Shared-gene UMAP — {annotation}",
+                    np.asarray(adata_sc.obsm[OBSM_UMAP_SHARED_GENES]),
+                    labels,
+                    False,
+                )
+            )
+    elif show_shared_umap and have_shared:
+        panels.append(
+            (
+                f"Shared-gene UMAP — {annotation}",
+                np.asarray(adata_sc.obsm[OBSM_UMAP_SHARED_GENES]),
+                labels,
+                False,
+            )
+        )
+    if not reference_layout:
+        panels.append(all_gene)
+    if coords is not None and st_labels is not None:
+        panels.append((f"Mapped {annotation}", coords, st_labels, True))
+
+    n_cols = len(panels)
+    fig = make_subplots(
+        rows=1,
+        cols=n_cols,
+        subplot_titles=[p[0] if p is not None else "" for p in panels],
+        horizontal_spacing=0.06 if n_cols >= 3 else 0.08,
+    )
+    shown: set[str] = set()
+    for col, panel in enumerate(panels, start=1):
+        if panel is None:
+            fig.update_xaxes(visible=False, row=1, col=col)
+            fig.update_yaxes(visible=False, row=1, col=col)
+            continue
+        _title, xy, lab, spatial = panel
+        for t in types:
+            mask = lab == t
+            if not mask.any():
+                continue
+            fig.add_trace(
+                go.Scattergl(
+                    x=xy[mask, 0],
+                    y=xy[mask, 1],
+                    mode="markers",
+                    marker=dict(size=dot_size, color=colors[t], opacity=1.0),
+                    name=t,
+                    legendgroup=t,
+                    showlegend=t not in shown,
+                    hovertemplate=f"{t}<extra></extra>",
+                ),
+                row=1,
+                col=col,
+            )
+            shown.add(t)
+        style_scatter_axes(
+            fig,
+            row=1,
+            col=col,
+            xref=fig.data[-1].xaxis or "x",
+            coords=xy,
+            xtitle="x" if spatial else "UMAP1",
+            ytitle="y" if spatial else "UMAP2",
+            equal_aspect=True,
+            reversed_y=spatial,
+            hide_ticks=not spatial,
+        )
+    return base_layout(
+        fig,
+        height=520 if reference_layout else 720,
+        legend={**STATE_LEGEND, "title": annotation, "y": 1.12},
         margin=dict(l=10, r=10, t=70, b=10),
     )
 

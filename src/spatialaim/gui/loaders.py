@@ -1,6 +1,6 @@
 """
 The app's cached reads: a K's mapping, the ST coordinates, the per-cell shape
-features, the scRNA annotation columns and the reference scaffold. Each is cached
+features, the scRNA-seq annotation columns and the reference scaffold. Each is cached
 by Streamlit, so a rerun does not read the file again.
 """
 
@@ -73,6 +73,12 @@ def obs_columns(sc_path_str: str) -> list[str]:
         return data_access.list_obs_columns(Path(sc_path_str))
     except Exception:  # noqa: BLE001 - an unreadable/absent file just offers nothing
         return []
+
+
+@st.cache_data(show_spinner=False, max_entries=demo.cache_entries(8))
+def annotation_labels(sc_path_str: str, column: str) -> pd.Series:
+    """The reference's labels in annotation ``column``, indexed by cell."""
+    return data_access.load_obs_column(Path(sc_path_str), column)
 
 
 def load_scaffold(

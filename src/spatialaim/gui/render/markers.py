@@ -7,7 +7,10 @@ it; plus the per-gene expression lookups the cell-type modal plots.
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection
+import threading
+import warnings
+from collections import OrderedDict
+from collections.abc import Callable, Collection
 from pathlib import Path
 
 import numpy as np
@@ -17,11 +20,8 @@ import scanpy as sc
 import streamlit as st
 from anndata import AnnData
 
-from spatialaim.adata_schema import LAYER_LOGNORM, OBS_COMPUTED_STATE, UNS_SHARED_GENES
-from spatialaim.analysis.loading import (
-    infer_cell_to_state_cluster,
-    load_start_cluster_to_state,
-)
+from spatialaim.adata_schema import LAYER_LOGNORM, OBS_START_CLUSTER, UNS_SHARED_GENES
+from spatialaim.analysis.loading import load_start_cluster_to_state
 from spatialaim.gui import data_access, demo
 from spatialaim.gui.render.common import (
     SpatialContext,
@@ -34,6 +34,16 @@ from spatialaim.gui.state_names import label as state_label
 from spatialaim.utils import to_dense
 
 logger = logging.getLogger(__name__)
+
+# scanpy's rank_genes_groups fills its result table column by column, which
+# makes pandas warn about fragmentation once per tested group, every ranking.
+# Harmless and not ours to fix; set once here (filters are process-wide, so
+# the worker thread's rankings are covered too).
+warnings.filterwarnings(
+    "ignore",
+    category=pd.errors.PerformanceWarning,
+    module=r"scanpy\.tools\._rank_genes_groups",
+)
 
 
 def _rank_markers(X, labels: np.ndarray, genes: list[str]) -> dict | None:
@@ -56,12 +66,15 @@ def _rank_markers(X, labels: np.ndarray, genes: list[str]) -> dict | None:
     if len(tested) < 2:
         return None
 
+    # String indices up front: AnnData would otherwise convert them and warn.
     adata = AnnData(
         X=X.copy(),
-        obs=pd.DataFrame({"state": pd.Categorical([str(s) for s in labels])}),
+        obs=pd.DataFrame(
+            {"state": pd.Categorical([str(s) for s in labels])},
+            index=[str(i) for i in range(len(labels))],
+        ),
+        var=pd.DataFrame(index=list(genes)),
     )
-    adata.obs_names = [str(i) for i in range(adata.n_obs)]
-    adata.var_names = genes
     adata.uns["log1p"] = {"base": None}  # tells scanpy the data is natural-log lognorm
     sc.tl.rank_genes_groups(
         adata,
@@ -104,73 +117,229 @@ def _rank_markers(X, labels: np.ndarray, genes: list[str]) -> dict | None:
 
 
 def shared_genes(adata_sc: AnnData) -> list[str]:
-    """The scaffold's shared genes (scRNA ∩ ST), in their stored order."""
+    """The scaffold's shared genes (scRNA-seq ∩ ST), in their stored order."""
     shared = list(adata_sc.uns.get(UNS_SHARED_GENES, []))
     return [g for g in shared if g in adata_sc.var_names]
 
 
-@st.cache_data(show_spinner="Ranking marker genes…", max_entries=demo.cache_entries(64))
-def _state_markers(_adata_sc, root_str: str, k: int):
-    """Reference marker genes per computed cell type (``_rank_markers``) over the
-    shared genes, on the all-gene lognorm layer. ``None`` when fewer than two
-    shared genes or testable cell types exist. Cached on ``(root, k)`` because
-    the dotplot, the modal and every panel's hover read it; ``_adata_sc`` leads
-    with an underscore so ``st.cache_data`` does not hash the scaffold (it is the
-    stable, resource-cached one for this run root).
-    """
-    start_cluster_to_state = load_start_cluster_to_state(
-        data_access.k_dir(Path(root_str), k)
-    )
-    infer_cell_to_state_cluster(_adata_sc, start_cluster_to_state)
-    cell_states = _adata_sc.obs[OBS_COMPUTED_STATE].astype(int).to_numpy()
-    genes = shared_genes(_adata_sc)
-    if len(genes) < 2:
-        return None
-    return _rank_markers(_adata_sc[:, genes].layers[LAYER_LOGNORM], cell_states, genes)
+# -- The marker store ---------------------------------------------------------
+#
+# Ranking marker genes (Wilcoxon over every cell or spot) is by far the slowest
+# step of showing a new K: seconds on a slice with a few 100k spots. So the
+# rankings live in a process-wide store fed by one background worker: the plots
+# ask without waiting (``top_genes_per_state(wait=False)``), draw "Computing
+# marker genes…" in their hover meanwhile, and ``marker_poller`` reruns the app
+# once a ranking this session waits for is done. Views that need a ranking to
+# draw at all (the dotplots, the cell-type modal) wait for it; one not started
+# yet is then computed in the caller's thread right away.
+#
+# The worker takes the most recently requested ranking first, so sliding through
+# K does not queue every K passed on the way in front of the one on show.
 
 
-@st.cache_resource(
-    show_spinner="Loading spatial expression…", max_entries=demo.cache_entries(4)
-)
+def _cap(demo_n: int, local_n: int) -> int:
+    """Entry cap of a process-wide store: ``demo_n`` in the online demo,
+    ``local_n`` on a local GUI (bounded too, unlike Streamlit's caches there,
+    since these hold whole rankings and expression matrices)."""
+    return demo.cache_entries(demo_n) or local_n
+
+
+_cond = threading.Condition()
+_results: OrderedDict[tuple, dict | None] = OrderedDict()
+_running: set[tuple] = set()
+_stack: list[tuple[tuple, Callable[[], dict | None]]] = []
+_worker: threading.Thread | None = None
+_lognorm: OrderedDict[tuple, object] = OrderedDict()
+_lognorm_lock = threading.Lock()
+_WAITING = "_markers_waiting"  # session key: rankings this session waits for
+
+
+def _store(key: tuple, result: dict | None) -> None:
+    """Keep ``result`` (call with ``_cond`` held), dropping the oldest beyond
+    the cap."""
+    _results[key] = result
+    _results.move_to_end(key)
+    while len(_results) > _cap(64, 512):
+        _results.popitem(last=False)
+
+
+def _run(key: tuple, fn: Callable[[], dict | None]) -> None:
+    """Compute one ranking (``key`` already marked running) and publish it."""
+    try:
+        result = fn()
+    except Exception:  # noqa: BLE001 - a failed ranking just shows no genes
+        logger.exception("Marker ranking %s failed", key)
+        result = None
+    with _cond:
+        _store(key, result)
+        _running.discard(key)
+        _cond.notify_all()
+
+
+def _work() -> None:
+    while True:
+        with _cond:
+            while not _stack:
+                _cond.wait()
+            key, fn = _stack.pop()
+            _running.add(key)
+        _run(key, fn)
+
+
+def _request(key: tuple, fn: Callable[[], dict | None]) -> tuple[bool, dict | None]:
+    """``(ready, ranking)`` without waiting; queues the ranking (on top) if it
+    is neither done nor computing."""
+    global _worker
+    with _cond:
+        if key in _results:
+            _results.move_to_end(key)
+            return True, _results[key]
+        if key not in _running:
+            _stack[:] = [job for job in _stack if job[0] != key]
+            _stack.append((key, fn))
+            if _worker is None or not _worker.is_alive():
+                _worker = threading.Thread(
+                    target=_work, name="marker-ranking", daemon=True
+                )
+                _worker.start()
+            _cond.notify_all()
+    return False, None
+
+
+def _get(key: tuple, fn: Callable[[], dict | None]) -> dict | None:
+    """The ranking, waiting for it: one computing is awaited, one queued or not
+    asked for yet is computed here."""
+    with _cond:
+        if key in _results:
+            return _results[key]
+        if key in _running:
+            while key not in _results:
+                _cond.wait()
+            return _results[key]
+        _stack[:] = [job for job in _stack if job[0] != key]
+        _running.add(key)
+    _run(key, fn)
+    with _cond:
+        return _results.get(key)
+
+
 def _spatial_lognorm(st_path_str: str, genes: tuple[str, ...]):
     """ST lognorm over ``genes`` (see ``data_access.load_spatial_lognorm``),
-    loaded once per ST file and gene set."""
-    return data_access.load_spatial_lognorm(Path(st_path_str), list(genes))
+    loaded once per ST file and gene set; safe from the worker thread."""
+    key = (st_path_str, genes)
+    with _lognorm_lock:
+        if key not in _lognorm:
+            _lognorm[key] = data_access.load_spatial_lognorm(
+                Path(st_path_str), list(genes)
+            )
+            while len(_lognorm) > _cap(2, 4):
+                _lognorm.popitem(last=False)
+        return _lognorm[key]
 
 
-@st.cache_data(
-    show_spinner="Ranking spatial marker genes…", max_entries=demo.cache_entries(64)
-)
-def _spatial_state_markers(_adata_sc, _hard, root_str: str, k: int, st_path_str: str):
-    """Spatial marker genes per *assigned* cell type (``_rank_markers`` on the ST
-    lognorm, grouped by this mapper's hard assignment) over the shared genes.
-    ``None`` when the ranking is impossible or the assignment does not match the
-    ST file's spots. Cached on ``(root, k, st_path)``, which fix ``_hard``.
-    """
-    genes = shared_genes(_adata_sc)
-    if len(genes) < 2:
-        return None
-    X = _spatial_lognorm(st_path_str, tuple(genes))
-    if X.shape[0] != len(_hard):
-        logger.warning(
-            "Spatial markers skipped: %d spots in %s but %d assignments.",
-            X.shape[0],
-            st_path_str,
-            len(_hard),
-        )
-        return None
-    return _rank_markers(X, _hard, genes)
+_ref_cache: dict[int, tuple[AnnData, tuple[str, ...], object]] = {}
+
+
+def _ref_lognorm(adata_sc: AnnData, genes: list[str]):
+    """The scaffold's lognorm layer over ``genes``, sliced once per scaffold (in
+    the calling thread), so asking for a cached ranking stays cheap."""
+    hit = _ref_cache.get(id(adata_sc))
+    if hit is None or hit[0] is not adata_sc or hit[1] != tuple(genes):
+        if len(_ref_cache) >= _cap(4, 8):
+            _ref_cache.clear()
+        hit = (adata_sc, tuple(genes), adata_sc[:, genes].layers[LAYER_LOGNORM])
+        _ref_cache[id(adata_sc)] = hit
+    return hit[2]
+
+
+def _job(
+    adata_sc: AnnData, root: Path, k: int, spatial: SpatialContext | None
+) -> tuple[tuple, Callable[[], dict | None]]:
+    """The store key and the ranking function of one ranking: the reference one
+    (per computed cell type, over the shared genes on the all-gene lognorm
+    layer), or with ``spatial`` the ST one (per *assigned* cell type, on the ST
+    lognorm). Everything the function reads from the scaffold is taken here, in
+    the calling thread, so the worker never touches the shared scaffold."""
+    genes = shared_genes(adata_sc)
+    if spatial is None:
+        key = ("ref", str(root), int(k))
+        cut = load_start_cluster_to_state(data_access.k_dir(Path(root), k))
+        states = cut[adata_sc.obs[OBS_START_CLUSTER].astype(int).to_numpy()]
+        X = _ref_lognorm(adata_sc, genes) if len(genes) >= 2 else None
+
+        def fn() -> dict | None:
+            if X is None:
+                return None
+            return _rank_markers(X, states.astype(int), genes)
+
+        return key, fn
+
+    key = ("st", str(root), int(k), spatial.st_path)
+    hard = np.asarray(spatial.hard)
+
+    def fn() -> dict | None:
+        if len(genes) < 2:
+            return None
+        X = _spatial_lognorm(spatial.st_path, tuple(genes))
+        if X.shape[0] != len(hard):
+            logger.warning(
+                "Spatial markers skipped: %d spots in %s but %d assignments.",
+                X.shape[0],
+                spatial.st_path,
+                len(hard),
+            )
+            return None
+        return _rank_markers(X, hard, genes)
+
+    return key, fn
 
 
 def _markers(
     adata_sc: AnnData, root: Path, k: int, spatial: SpatialContext | None
 ) -> dict | None:
-    """The reference ranking, or the spatial one when ``spatial`` is given."""
-    if spatial is None:
-        return _state_markers(adata_sc, str(root), int(k))
-    return _spatial_state_markers(
-        adata_sc, spatial.hard, str(root), int(k), spatial.st_path
-    )
+    """The reference ranking, or the spatial one when ``spatial`` is given
+    (``None`` when impossible); waits for it."""
+    with st.spinner("Ranking marker genes…"):
+        return _get(*_job(adata_sc, root, k, spatial))
+
+
+def _markers_now(
+    adata_sc: AnnData, root: Path, k: int, spatial: SpatialContext | None
+) -> tuple[bool, dict | None]:
+    """``(ready, ranking)`` without waiting. A ranking not ready yet is queued
+    and remembered as awaited by this session, so ``marker_poller`` reruns the
+    app when it is done."""
+    key, fn = _job(adata_sc, root, k, spatial)
+    ready, mk = _request(key, fn)
+    if not ready:
+        try:
+            st.session_state.setdefault(_WAITING, set()).add(key)
+        except Exception:  # noqa: BLE001 - no session (e.g. a script): no poll
+            pass
+    return ready, mk
+
+
+def _awaited_done() -> bool:
+    """Whether a ranking this session waits for has finished (then forgotten)."""
+    waiting: set = st.session_state.get(_WAITING) or set()
+    with _cond:
+        done = {key for key in waiting if key in _results}
+    waiting -= done
+    return bool(done)
+
+
+@st.fragment(run_every=0.75)
+def _poll() -> None:
+    if _awaited_done():
+        st.rerun(scope="app")
+
+
+def marker_poller() -> None:
+    """Rerun the app as soon as a marker ranking a plot is waiting for is done,
+    so its hover gains the genes. Call once per page, after its plots; draws
+    nothing and polls only while a ranking is awaited."""
+    if st.session_state.get(_WAITING):
+        _poll()
 
 
 def _up_down(mk: dict, state: int, n: int) -> tuple[list[int], list[int]]:
@@ -184,8 +353,10 @@ def _up_down(mk: dict, state: int, n: int) -> tuple[list[int], list[int]]:
 
 
 # Per state: its top-ranked marker genes for the hover box, keyed "up"/"down"
-# (reference) and "up_st"/"down_st" (spatial, mapper tabs only).
+# (reference) and "up_st"/"down_st" (spatial, mapper tabs only). The entry
+# under PENDING lists the rankings still computing ("scRNA-seq", "ST").
 TopGenes = dict[int, dict[str, list[str]]]
+PENDING = -1
 
 
 def top_genes_per_state(
@@ -195,6 +366,7 @@ def top_genes_per_state(
     n: int = 3,
     *,
     spatial: SpatialContext | None = None,
+    wait: bool = False,
 ) -> TopGenes:
     """Per state, the ``n`` most up- and downregulated marker genes (Wilcoxon vs.
     rest) in the reference and, with ``spatial``, among the ST spots assigned to
@@ -203,13 +375,24 @@ def top_genes_per_state(
     Up genes need a positive score, down genes a negative one, most extreme
     first. Empty when the scaffold or the ranking is unavailable — callers then
     simply show no genes; a state too small to test is left out.
+
+    Without ``wait`` a ranking that is not ready yet is queued in the background
+    and named under ``PENDING`` instead (see ``marker_poller``).
     """
     if adata_sc is None or root is None:
         return {}
     out: TopGenes = {}
-    sources = [("", None)] + ([("_st", spatial)] if spatial is not None else [])
-    for suffix, ctx in sources:
-        mk = _markers(adata_sc, root, k, ctx)
+    sources = [("", None, "scRNA-seq")] + (
+        [("_st", spatial, "ST")] if spatial is not None else []
+    )
+    for suffix, ctx, name in sources:
+        if wait:
+            mk = _markers(adata_sc, root, k, ctx)
+        else:
+            ready, mk = _markers_now(adata_sc, root, k, ctx)
+            if not ready:
+                out.setdefault(PENDING, {}).setdefault("pending", []).append(name)
+                continue
         if mk is None:
             continue
         for s in mk["ranked"]:
@@ -223,24 +406,30 @@ def top_genes_per_state(
 def top_genes_suffix(top_genes: TopGenes | None, state: int) -> str:
     """The hover box's marker lines for ``state``: ``↑ A, B, C`` / ``↓ D, E, F``
     from the reference, or — when the figure carries spatial rankings — four
-    lines ``↑ scRNA``, ``↑ ST``, ``↓ scRNA``, ``↓ ST``. Empty lists are left out;
-    '' when the state is unknown."""
+    lines ``↑ scRNA-seq``, ``↑ ST``, ``↓ scRNA-seq``, ``↓ ST``. Empty lists are left out;
+    '' when the state is unknown. A ranking still computing adds an italic
+    "Computing … marker genes…" line."""
     top_genes = top_genes or {}
     hits = top_genes.get(int(state)) or {}
+    pending = (top_genes.get(PENDING) or {}).get("pending", [])
     has_st = any("up_st" in v for v in top_genes.values())
     lines = (
         (
-            ("up", "↑ scRNA:"),
+            ("up", "↑ scRNA-seq:"),
             ("up_st", "↑ ST:"),
-            ("down", "↓ scRNA:"),
+            ("down", "↓ scRNA-seq:"),
             ("down_st", "↓ ST:"),
         )
         if has_st
         else (("up", "↑"), ("down", "↓"))
     )
-    return "".join(
+    text = "".join(
         f"<br>{label} {', '.join(hits[key])}" for key, label in lines if hits.get(key)
     )
+    if pending:
+        which = " and ".join(pending)
+        text += f"<br><i>Computing {which} marker genes…</i>"
+    return text
 
 
 def state_marker_table(
@@ -327,10 +516,10 @@ def render_state_markers_figure(
     Dot area = fraction of the row's cells expressing the gene; dot colour = the
     row's mean lognorm expression, min-max scaled per gene across rows. With
     ``spatial`` the same plot is drawn for the ST spots, grouped by this mapper's
-    hard assignment (``_spatial_state_markers``). ``marker_types`` keeps only
+    hard assignment (the ST ranking of ``_job``). ``marker_types`` keeps only
     those types' rows and marker columns; the colour stays scaled across all
     types, so a lone row keeps its contrast. Returns ``None`` when the ranking
-    is unavailable (see ``_state_markers``) or no column is left.
+    is unavailable (see ``_job``) or no column is left.
     """
     mk = _markers(adata_sc, root, k, spatial)
     if mk is None:

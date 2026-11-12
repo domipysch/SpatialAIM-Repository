@@ -2,7 +2,7 @@
 Launcher for the SpatialAIM GUI.
 
 Starts a Streamlit server running ``spatialaim/gui/app.py``. Everything - the
-scRNA/ST paths, output directory, K step and the agglomeration linkage - is set in
+scRNA-seq/ST paths, output directory, K step and the agglomeration linkage - is set in
 the app's sidebar. ``--demo_data`` instead serves the read-only online demo over
 the precomputed results in that folder (see ``demo.py``).
 

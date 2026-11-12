@@ -253,6 +253,16 @@ def list_obs_columns(sc_path: Path) -> list[str]:
             adata.file.close()
 
 
+def load_obs_column(sc_path: Path, column: str) -> pd.Series:
+    """One ``obs`` column of an h5ad as strings, indexed by cell (backed mode)."""
+    adata = ad.read_h5ad(sc_path, backed="r")
+    try:
+        return adata.obs[column].astype(str).copy()
+    finally:
+        if adata.isbacked:
+            adata.file.close()
+
+
 def load_spatial_coords(st_path: Path) -> np.ndarray | None:
     """Spatial coordinates (n_spots x 2) from the ST h5ad, or None if absent."""
     adata = ad.read_h5ad(st_path, backed="r")

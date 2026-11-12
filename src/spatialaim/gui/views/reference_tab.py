@@ -22,6 +22,7 @@ from spatialaim.gui.render.headline import (
 )
 from spatialaim.gui.render.markers import render_state_markers_figure
 from spatialaim.gui.render.report import render_start_cluster_merge_figure
+from spatialaim.gui.views.annotation import annotation_picker, annotation_plots
 from spatialaim.gui.views.cards import export_popover, plot_card
 from spatialaim.gui.views.cell_type_modal import open_cell_type_dialog, reopened_state
 from spatialaim.gui.views.controls import Controls
@@ -118,58 +119,87 @@ def reference_tab(mappers: list[str], args: argparse.Namespace, ctrl: Controls) 
 
     fig_umaps = render_reference_umaps_figure(adata_sc, ref_root, ctrl.k)
     menu_state, _shown = headline_plot(fig_umaps, key="ref_umaps", context_menu=True)
+    # The annotation row (if shown) sits between the UMAPs and the caption.
+    annotation_slot = st.container()
     if menu_state is None:
         menu_state = reopened_state("ref_umaps", ctrl.k)
     if menu_state is not None:
         open_cell_type_dialog(
             adata_sc, ref_root, ctrl.k, menu_state, args.output_dir, origin="ref_umaps"
         )
-    export_popover(
-        fig_umaps, key="ref_umaps_exp", stem=f"reference_umaps_k{ctrl.k:03d}"
-    )
     st.caption(
         f"K = {ctrl.k}. The start clustering and its tree cut are shared across "
         f"methods (shown from **{ref_mapper}**)."
     )
+    buttons = st.container(horizontal=True, gap="small", vertical_alignment="center")
+    with buttons:
+        export_popover(
+            fig_umaps, key="ref_umaps_exp", stem=f"reference_umaps_k{ctrl.k:03d}"
+        )
+        column = annotation_picker(
+            args,
+            "ref",
+            help="Add a row with a reference annotation on the reference UMAPs. "
+            "Independent of K.",
+        )
+    if column is not None:
+        with annotation_slot:
+            annotation_plots(
+                args,
+                adata_sc,
+                column,
+                "ref",
+                reference_layout=True,
+                state_root=ref_root,
+                k=ctrl.k,
+            )
 
     st.divider()
-    with st.expander("Cell type marker genes", expanded=False):
-        n_genes = st.number_input(
-            "Genes per cell type",
-            min_value=1,
-            max_value=25,
-            value=5,
-            step=1,
-            key="ref_markers_n",
-            help="Top-ranked shared genes shown per computed cell type "
-            "(scanpy rank_genes_groups, Wilcoxon, each type vs. the rest, on "
-            "the lognorm layer).",
-        )
-        fig_mk = render_state_markers_figure(
-            adata_sc, ref_root, ctrl.k, n_genes=int(n_genes)
-        )
-        if fig_mk is None:
-            st.info(
-                "Marker genes need at least two shared genes and two cell types "
-                "with two or more cells each."
+    # Lazy: the ranking is computed only while the section is open.
+    section = st.expander(
+        "Cell type marker genes",
+        expanded=False,
+        key="ref_markers_section",
+        on_change="rerun",
+    )
+    if section.open:
+        with section:
+            n_genes = st.number_input(
+                "Genes per cell type",
+                min_value=1,
+                max_value=25,
+                value=5,
+                step=1,
+                key="ref_markers_n",
+                help="Top-ranked shared genes shown per computed cell type "
+                "(scanpy rank_genes_groups, Wilcoxon, each type vs. the rest, on "
+                "the lognorm layer).",
             )
-        else:
-            plot_card(
-                fig_mk,
-                key="ref_markers",
-                stem=f"reference_marker_genes_k{ctrl.k:03d}_n{int(n_genes)}",
-                caption="Dot size: fraction of the cell type's cells expressing "
-                "the gene. Colour: mean lognorm expression, scaled 0–1 per gene "
-                "across cell types. Hover for the Wilcoxon score and adjusted "
-                "p-value.",
+            fig_mk = render_state_markers_figure(
+                adata_sc, ref_root, ctrl.k, n_genes=int(n_genes)
             )
-        if st.button(
-            "Set cell type names",
-            icon=":material/edit:",
-            key="ref_name_states",
-            help="Give the computed cell types names, used everywhere in the UI.",
-        ):
-            _state_names_dialog(adata_sc, ref_root, args.output_dir, ctrl.k)
+            if fig_mk is None:
+                st.info(
+                    "Marker genes need at least two shared genes and two cell types "
+                    "with two or more cells each."
+                )
+            else:
+                plot_card(
+                    fig_mk,
+                    key="ref_markers",
+                    stem=f"reference_marker_genes_k{ctrl.k:03d}_n{int(n_genes)}",
+                    caption="Dot size: fraction of the cell type's cells expressing "
+                    "the gene. Colour: mean lognorm expression, scaled 0–1 per gene "
+                    "across cell types. Hover for the Wilcoxon score and adjusted "
+                    "p-value.",
+                )
+            if st.button(
+                "Set cell type names",
+                icon=":material/edit:",
+                key="ref_name_states",
+                help="Give the computed cell types names, used everywhere in the UI.",
+            ):
+                _state_names_dialog(adata_sc, ref_root, args.output_dir, ctrl.k)
     with st.expander("Start clusters merged per cell type", expanded=False):
         plot_card(
             render_start_cluster_merge_figure(adata_sc, ref_root, ctrl.k),

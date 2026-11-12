@@ -42,7 +42,7 @@ _ANNOTATIONS_HELP = (
     "SpatialAIM always starts from a Leiden over-clustering of the reference. Each "
     "annotation picked here adds a sweep that starts from its cell types instead; "
     "the results view switches between these starting points. Offered are the "
-    "scRNA obs columns that label every cell. Annotations can be added after a "
+    "scRNA-seq obs columns that label every cell. Annotations can be added after a "
     "run: the next run computes every selected method on the starting points it "
     "is missing. Starting points with results stay selected."
 )
@@ -211,11 +211,11 @@ def _annotation_row(sc_str: str, lock: dict | None) -> list[str]:
             _ANNOTATIONS_LABEL,
             [],
             disabled=True,
-            placeholder=f"{_LEIDEN_ONLY} (no complete annotation in the scRNA data)",
+            placeholder=f"{_LEIDEN_ONLY} (no complete annotation in the scRNA-seq data)",
             help=_ANNOTATIONS_HELP,
         )
         return []
-    # A choice made for another scRNA file may not exist in this one; the
+    # A choice made for another scRNA-seq file may not exist in this one; the
     # recorded starts are always part of the choice.
     chosen_before = st.session_state.get("cfg_annotations", [])
     st.session_state["cfg_annotations"] = [
@@ -460,7 +460,7 @@ def render_sidebar() -> argparse.Namespace | None:
     st.session_state.setdefault("cfg_out", "")
     st.session_state.setdefault("cfg_linkage", LINKAGE_METHODS[0])
 
-    sc_str = _path_row("scRNA .h5ad path", "cfg_sc", "file", "browse_sc")
+    sc_str = _path_row("scRNA-seq .h5ad path", "cfg_sc", "file", "browse_sc")
     st_str = _path_row("ST .h5ad path", "cfg_st", "file", "browse_st")
     seg_str = _path_row("Segmentation path (optional)", "cfg_seg", "tif", "browse_seg")
     out_str = _path_row("Output directory", "cfg_out", "dir", "browse_out")
@@ -490,7 +490,7 @@ def render_sidebar() -> argparse.Namespace | None:
 
     # -- step 2: scaffold knobs + methods ---------------------------------
     # The header stays visible while step 1 is incomplete; its controls need the
-    # paths (the annotations read the scRNA obs, the rest lock against the output
+    # paths (the annotations read the scRNA-seq obs, the rest lock against the output
     # folder), so they are replaced by a hint until then.
     st.sidebar.divider()
     st.sidebar.subheader("2. Configure method")
@@ -586,7 +586,7 @@ def _render_demo_sidebar() -> argparse.Namespace | None:
         return None
     by_id = {p.pair_id: p for p in pairs}
     pair_id = st.sidebar.selectbox(
-        "Dataset pair (scRNA × ST)",
+        "Dataset pair (scRNA-seq × ST)",
         list(by_id),
         format_func=lambda i: by_id[i].label,
         key="demo_pair",
@@ -596,7 +596,7 @@ def _render_demo_sidebar() -> argparse.Namespace | None:
         "advance. Choosing another pair resets the result pages.",
     )
     pair = by_id[pair_id]
-    # scRNA × ST authors; once when both sides come from the same authors.
+    # scRNA-seq × ST authors; once when both sides come from the same authors.
     authors = list(dict.fromkeys(a for a in (pair.author, pair.st_author) if a))
     details = " · ".join(x for x in (pair.tissue, " × ".join(authors)) if x)
     if details:
@@ -604,7 +604,7 @@ def _render_demo_sidebar() -> argparse.Namespace | None:
     links = [
         f"{side} " + " · ".join(f"[{text}]({url})" for text, url in parts if url)
         for side, parts in (
-            ("scRNA:", (("paper", pair.sc_paper), ("data", pair.sc_data))),
+            ("scRNA-seq:", (("paper", pair.sc_paper), ("data", pair.sc_data))),
             ("ST:", (("paper", pair.st_paper), ("data", pair.st_data))),
         )
         if any(url for _, url in parts)

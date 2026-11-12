@@ -10,6 +10,7 @@ from typing import NamedTuple
 
 import numpy as np
 import plotly.graph_objects as go
+from plotly.colors import qualitative as px_colors
 
 from spatialaim.gui import state_names
 
@@ -72,6 +73,10 @@ CARD_FONT = dict(family="'Source Sans Pro', 'Segoe UI', sans-serif", size=12)
 
 # The horizontal state-legend strip shared by the headline / compare / reference
 # figures; each sets its own vertical ``y`` offset via ``{**STATE_LEGEND, ...}``.
+# Colours beyond tab20, for annotated types that need one no cell type uses
+# (``views.annotation``): plotly's Dark24 then Alphabet.
+EXTRA_COLORS = [c.lower() for c in px_colors.Dark24 + px_colors.Alphabet]
+
 STATE_LEGEND = dict(
     itemsizing="constant",
     title="Cell types",

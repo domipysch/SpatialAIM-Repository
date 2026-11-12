@@ -147,7 +147,7 @@ def main() -> None:
     if settings is None:
         st.title("SpatialAIM results explorer")
         st.info(
-            "Set the scRNA path (.h5ad format), ST path (.h5ad format), and "
+            "Set the scRNA-seq path (.h5ad format), ST path (.h5ad format), and "
             "output directory in the sidebar to begin."
         )
         return

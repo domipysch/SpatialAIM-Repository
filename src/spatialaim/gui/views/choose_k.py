@@ -108,9 +108,18 @@ def _best_k_rows(score_table: pd.DataFrame) -> list[tuple[str, int, float, str]]
     reported as a winner.
     """
     best = scores.best_ks(score_table)
-    labels = {"overall": "**Best overall** (harmonic mean across the criteria):"} | {
-        c.key: f"**Best {c.label.lower()}** (harmonic mean):" for c in scores.CRITERIA
-    }
+    labels = (
+        {"overall": "**Best overall** (harmonic mean across the criteria):"}
+        | {
+            c.key: f"**Best {c.label.lower()}** (harmonic mean):"
+            for c in scores.CRITERIA
+        }
+        | {
+            f"{a}+{b}": f"**Best {scores.CRITERION[a].short.lower()} + "
+            f"{scores.CRITERION[b].short.lower()}** (harmonic mean):"
+            for a, b in scores.SCATTER_PAIRS
+        }
+    )
     return [
         (labels[slug], hit[0], hit[1], slug)
         for slug, hit in best.items()
@@ -230,3 +239,13 @@ def render_choose_k(
             "per K) with the pareto filter.",
         ):
             _ksweep_scatter_dialog(mapper, score_table, ks_all)
+
+
+def pareto_ks(root: Path) -> list[int]:
+    """One mapper's Pareto-optimal Ks on the criterion scores (empty while its
+    sweep table is missing). Same set as the "Criterion trade-offs" filter."""
+    df = data_access.ksweep_table(root)
+    if df is None or df.empty:
+        return []
+    table = scores.score_table(df)
+    return sorted(int(k) for k in table["k"][scores.pareto_mask(table)])

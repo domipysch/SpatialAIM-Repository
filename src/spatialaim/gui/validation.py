@@ -33,7 +33,7 @@ def _validate_pair(
 def _subject_heading(key: str) -> str:
     kind, _, name = key.partition(":")
     return {
-        "sc": f"scRNA reference — {name}",
+        "sc": f"scRNA-seq reference — {name}",
         "st": f"ST slice — {name}",
     }.get(kind, "Pair (shared genes)")
 
@@ -93,7 +93,7 @@ def data_requirements_dialog() -> None:
 
     st.markdown("**Required input**")
     st.markdown("""
-| | scRNA reference | ST slice |
+| | scRNA-seq reference | ST slice |
 |---|---|---|
 | file type | `.h5ad` | `.h5ad` |
 | **`X`** | raw counts, cells × genes | raw counts, "cells" × genes |
@@ -103,12 +103,12 @@ def data_requirements_dialog() -> None:
 
     st.markdown("**Annotations are optional**")
     st.markdown(
-        "In default settings SpatialAIM does not need one — it over-clusters the reference itself. An scRNA `obs` "
+        "In default settings SpatialAIM does not need one — it over-clusters the reference itself. An scRNA-seq `obs` "
         "column with cell types can still be chosen under *Override starting "
         "clusters* to build the tree over that annotation instead."
     )
     st.markdown("""
-| | scRNA reference |
+| | scRNA-seq reference |
 |---|---|
 | **`obs["<YOUR-CELLTYPE-KEY>"]`** | cell type annotation columns |
 """)

@@ -1,5 +1,6 @@
 """
-The display controls of the result pages (K slider, shared-gene UMAP toggle).
+The display controls of the result pages (K slider, K navigation buttons,
+shared-gene UMAP toggle).
 
 Each page renders its own controls, but their values live in plain session-state
 keys (``_view_*``) as well: Streamlit drops a widget's state on a page that does
@@ -24,13 +25,11 @@ _VIEW_UMAP = "_view_shared_umap"
 class Controls(NamedTuple):
     """Display controls that drive a result page.
 
-    Only K and the shared-gene-UMAP toggle are page-wide; the confidence
-    threshold and "Plot confidence" checkbox are per mapper view (rendered inside
-    it, where they can be hidden when that mapper has no confidence).
+    Only K is page-wide; the shared-gene-UMAP toggle, the confidence threshold and
+    the "Plot confidence" checkbox are per mapper view (rendered under its plots).
     """
 
     k: int
-    show_shared_umap: bool
 
 
 def k_slider(ks: list[int], default_k: int | None = None) -> int:
@@ -50,13 +49,72 @@ def k_slider(ks: list[int], default_k: int | None = None) -> int:
     return k
 
 
-def shared_umap_toggle() -> bool:
-    """The shared-gene-UMAP checkbox, remembered across pages."""
+def k_nav_buttons(ks: list[int], k: int, best: int | None, pareto: list[int]) -> None:
+    """Three buttons beside the K slider: the next lower Pareto-optimal K, back to
+    the best overall K, and the next higher Pareto-optimal K. Each is disabled
+    when it has nowhere to go."""
+    lower = max((p for p in pareto if p < k and p in ks), default=None)
+    higher = min((p for p in pareto if p > k and p in ks), default=None)
+    row = st.container(horizontal=True, gap="small")
+    for label, target, key, help_ in (
+        ("← Pareto K", lower, "k_nav_lower", "Next lower Pareto-optimal K"),
+        ("↺ Best K", best if best != k else None, "k_nav_best", "Best overall K"),
+        ("Pareto K →", higher, "k_nav_higher", "Next higher Pareto-optimal K"),
+    ):
+        row.button(
+            label,
+            key=key,
+            disabled=target is None or target not in ks,
+            on_click=select_k,
+            args=(ks, target),
+            help=help_ + (f" ({target})" if target is not None else ""),
+            width="stretch",
+        )
+
+
+def toggle_button(
+    label: str, key: str, *, default: bool = False, help: str = ""
+) -> bool:
+    """An on/off switch drawn as a plain button whose box icon shows the state
+    (ticked in the primary colour while on, an empty grey box while off). The value lives in plain session
+    state under ``key``."""
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+    def _flip() -> None:
+        st.session_state[key] = not st.session_state[key]
+
+    on = bool(st.session_state[key])
+    # A plain button either way; only the box icon carries the state: ticked in
+    # the theme's primary colour while on, an empty grey box while off.
+    box = (
+        ":primary[:material/check_box:]"
+        if on
+        else ":gray[:material/check_box_outline_blank:]"
+    )
+    st.button(
+        f"{box} {label}",
+        key=f"{key}_btn",
+        on_click=_flip,
+        help=help or None,
+    )
+    return on
+
+
+def shared_umap_state() -> bool:
+    """The shared-gene-UMAP toggle's current value, readable before its button
+    renders (so the plot can be laid out first)."""
     if _UMAP_KEY not in st.session_state:
         st.session_state[_UMAP_KEY] = bool(st.session_state.get(_VIEW_UMAP, False))
-    show = st.checkbox(
-        "Show shared-gene-only UMAP",
-        key=_UMAP_KEY,
+    return bool(st.session_state[_UMAP_KEY])
+
+
+def shared_umap_toggle() -> bool:
+    """The shared-gene-UMAP toggle button, remembered across pages."""
+    show = toggle_button(
+        "Shared-gene UMAP",
+        _UMAP_KEY,
+        default=shared_umap_state(),
         help="Add the shared-gene (ST-overlap) UMAP as a third panel, left of "
         "the all-gene UMAP.",
     )

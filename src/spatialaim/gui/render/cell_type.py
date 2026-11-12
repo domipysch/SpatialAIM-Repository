@@ -250,7 +250,7 @@ def render_gene_distribution_figure(
         rows=1,
         cols=n_cols,
         subplot_titles=[
-            "Distribution in scRNA reference cells",
+            "Distribution in scRNA-seq reference cells",
             "Distribution in cells of spatial data",
         ][:n_cols],
         horizontal_spacing=0.1,
@@ -288,7 +288,7 @@ def render_gene_by_type_figure(
         else None
     )
     expr = gene_expression(adata_sc, str(root), gene)
-    groups = [("scRNA reference cells", data["states"], expr)]
+    groups = [("scRNA-seq reference cells", data["states"], expr)]
     if st_expr is not None:
         groups.append(("Cells of spatial data", np.asarray(spatial.hard), st_expr))
     fig = make_subplots(

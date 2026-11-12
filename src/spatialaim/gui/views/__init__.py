@@ -8,5 +8,6 @@ The GUI's screens and their building blocks.
 - ``choose_k``         the "Choose K" card
 - ``report``           a mapper's report card grid
 - ``cards``            card grid, plot card with export, metrics table
-- ``controls``         the shared K slider and shared-gene UMAP toggle
+- ``controls``         the shared K slider, K buttons and toggle buttons
+- ``annotation``       the "Show annotation" toggle, picker and annotation plot row
 """

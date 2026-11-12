@@ -17,10 +17,16 @@ from spatialaim.gui.loaders import load_scaffold, load_soft, spatial_coords
 from spatialaim.gui.render.common import SpatialContext
 from spatialaim.gui.render.headline import render_headline_figure
 from spatialaim.gui.render.markers import render_state_markers_figure
+from spatialaim.gui.views.annotation import annotation_picker, annotation_plots
 from spatialaim.gui.views.cards import export_popover, plot_card
 from spatialaim.gui.views.cell_type_modal import open_cell_type_dialog, reopened_state
 from spatialaim.gui.views.choose_k import render_choose_k
-from spatialaim.gui.views.controls import Controls
+from spatialaim.gui.views.controls import (
+    Controls,
+    shared_umap_state,
+    shared_umap_toggle,
+    toggle_button,
+)
 from spatialaim.gui.views.gene_modal import open_gene_dialog
 from spatialaim.gui.views.report import render_report
 from spatialaim.gui.widgets.headline_plot import headline_plot
@@ -40,11 +46,13 @@ def _headline(
     *,
     key_prefix: str,
     show_shared_umap: bool = False,
+    umap_toggle: bool = False,
     conf_controls: bool = False,
     threshold: float = 0.0,
     plot_confidence: bool = False,
     inspect_genes: bool = False,
     report_selection: bool = False,
+    annotation_toggle: bool = False,
 ) -> frozenset[int] | None:
     """UMAP(s) + live spatial plot sharing one state legend; ``inspect_genes``
     adds the "Inspect genes" button below them. With ``report_selection`` every
@@ -53,10 +61,15 @@ def _headline(
 
     When ``conf_controls`` is set and the mapper wrote per-spot confidence, the
     confidence-threshold slider and the "Plot confidence" checkbox are rendered
-    directly below the plots, aligned under the (rightmost) spatial panel, and
+    at the right end of the control row below the plots, and
     their values drive this tab's spatial colouring. Otherwise ``threshold`` /
     ``plot_confidence`` are taken from the arguments — the Compare tab passes
     neither and sets ``conf_controls=False``, so it never shows the controls.
+    With ``umap_toggle`` the shared-gene-UMAP checkbox (first in the control
+    row under the plots) decides ``show_shared_umap``. With
+    ``annotation_toggle`` a "Show annotation" button and annotation picker join
+    that row and, when on, add a second, K-independent row of plots below
+    (``_annotation_plots``).
     """
     _P, hard, confidence = load_soft(str(root), k)
     coords = spatial_coords(str(args.stdata))
@@ -67,20 +80,29 @@ def _headline(
     adata_sc = load_scaffold(args, warn="Scaffold build failed — UMAP unavailable")
 
     have_umap = adata_sc is not None
-    # Mirror render_headline_figure's panel logic so the confidence
-    # controls line up under the correct (rightmost) column.
-    have_shared = (
-        have_umap and show_shared_umap and OBSM_UMAP_SHARED_GENES in adata_sc.obsm
-    )
-    n_panels = int(have_shared) + int(have_umap) + int(have_spatial)
+    can_share = have_umap and OBSM_UMAP_SHARED_GENES in adata_sc.obsm
+    if umap_toggle:
+        show_shared_umap = shared_umap_state()
 
-    # Reserve the plot's slot; the confidence controls render *below* it so the
-    # figure stays on top and the controls sit under the spatial panel.
+    # Reserve the plot's slot; one control row renders *below* it: UMAP toggle,
+    # Inspect genes, Export, then the confidence threshold and "Plot confidence".
+    # The confidence values drive the figure, so they render first; the buttons
+    # fill their columns once the figure exists.
     plot_slot = st.container()
+    # The annotation row (if shown) sits between the plots and the control row.
+    annotation_slot = st.container()
+    # The click hint goes under both plot rows.
+    hint_slot = st.container()
+    # Left half: the buttons, packed to the left; right half: confidence.
+    col_left, col_right = st.columns(2, vertical_alignment="top")
+    buttons = col_left.container(horizontal=True, gap="small")
+    col_thr, col_pconf = col_right.columns([3, 1], vertical_alignment="bottom")
 
-    if conf_controls and have_conf and have_spatial and n_panels:
-        control_cols = st.columns(n_panels)
-        with control_cols[-1]:
+    if umap_toggle and can_share:
+        with buttons:
+            show_shared_umap = shared_umap_toggle()
+    if conf_controls and have_conf and have_spatial:
+        with col_thr:
             threshold = live_slider(
                 "Confidence threshold",
                 0.0,
@@ -89,10 +111,10 @@ def _headline(
                 0.0,
                 key=f"{key_prefix}_thr",
             )
-            plot_confidence = st.checkbox(
+        with col_pconf:
+            plot_confidence = toggle_button(
                 "Plot confidence",
-                value=False,
-                key=f"{key_prefix}_pconf",
+                f"{key_prefix}_pconf",
                 help="Colour cells by confidence intensity instead of assigned "
                 "cell type.",
             )
@@ -161,20 +183,49 @@ def _headline(
             open_cell_type_dialog(
                 adata_sc, root, k, menu_state, args.output_dir, spatial, origin=origin
             )
-        if adata_sc is not None:
-            st.caption(_PLOT_CLICK_HINT)
-            if inspect_genes and st.button(
+    if adata_sc is not None:
+        hint_slot.caption(_PLOT_CLICK_HINT)
+    with buttons:
+        if (
+            inspect_genes
+            and adata_sc is not None
+            and st.button(
                 "Inspect genes",
                 icon=":material/genetics:",
                 key=f"{key_prefix}_inspect_genes",
-            ):
-                open_gene_dialog(adata_sc, root, k, spatial)
+            )
+        ):
+            open_gene_dialog(adata_sc, root, k, spatial)
+    with buttons:
         # stem carries the figure identity (K + threshold + confidence toggle) so
         # the export cache invalidates when any of them changes (see export_popover).
         stem = f"{key_prefix}_k{k:03d}_thr{int(round(threshold * 100)):03d}"
         if plot_confidence:
             stem += "_conf"
         export_popover(fig, key=f"{key_prefix}_headline_exp", stem=stem)
+
+    if annotation_toggle and have_umap:
+        with buttons:
+            column = annotation_picker(
+                args,
+                key_prefix,
+                help="Add a row with a reference annotation on the UMAP(s) and, "
+                "if this method has run from that annotation, its mapping onto "
+                "the spatial data. Independent of K.",
+            )
+        if column is not None:
+            with annotation_slot:
+                annotation_plots(
+                    args,
+                    adata_sc,
+                    column,
+                    key_prefix,
+                    mapper=mapper,
+                    coords=coords,
+                    show_shared_umap=show_shared_umap,
+                    state_root=root,
+                    k=k,
+                )
 
     if coords is None:
         st.caption("ST data has no obsm['spatial'] — no spatial plot.")
@@ -192,7 +243,16 @@ def _state_markers_card(
     by this mapper's hard assignment at ``k``, plus the reference's for
     comparison. ``marker_types`` (the cell types shown in the headline plot)
     keeps only their rows and marker columns in both."""
-    with st.expander("Assigned cell type marker genes (ST)", expanded=False):
+    # Lazy: the rankings are computed only while the section is open.
+    section = st.expander(
+        "Assigned cell type marker genes (ST)",
+        expanded=False,
+        key=f"tab_{mapper}_markers_section",
+        on_change="rerun",
+    )
+    if not section.open:
+        return
+    with section:
         adata_sc = load_scaffold(args, warn="Scaffold build failed — no marker genes")
         if adata_sc is None:
             return
@@ -248,7 +308,7 @@ def _state_markers_card(
             )
 
         # The reference tab's card, for direct comparison (same K and gene count).
-        st.markdown("**Reference (scRNA) for comparison**")
+        st.markdown("**Reference (scRNA-seq) for comparison**")
         fig_ref = render_state_markers_figure(
             adata_sc, root, k, n_genes=int(n_genes), marker_types=marker_types
         )
@@ -355,15 +415,21 @@ def mapper_tab(
         ctrl.k,
         args,
         key_prefix=f"tab_{mapper}",
-        show_shared_umap=ctrl.show_shared_umap,
+        umap_toggle=True,
         conf_controls=True,
         inspect_genes=True,
         report_selection=True,
+        annotation_toggle=True,
     )
 
     st.divider()
     _state_markers_card(mapper, root, ctrl.k, args, marker_types=shown)
 
-    st.divider()
-    st.subheader("Report")
-    render_report(mapper, root, ctrl.k, args)
+    # Lazy: the report's cards are built only while the section is open, so
+    # moving K with it closed skips them.
+    report = st.expander(
+        "Report", expanded=False, key=f"tab_{mapper}_report", on_change="rerun"
+    )
+    if report.open:
+        with report:
+            render_report(mapper, root, ctrl.k, args)

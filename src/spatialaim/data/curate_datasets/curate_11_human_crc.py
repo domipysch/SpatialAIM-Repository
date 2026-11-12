@@ -1,62 +1,60 @@
 """
-Build dataset 11_human-crc: two patient-matched pairs (P2, P5), each a Flex
+Build dataset 11_human-crc: the patient-matched pair of patient P2, a Flex
 reference + one Xenium slice, for the GUI use case (Results section 5). Not part
 of the Experiment 1 corpus, so it is written to Data/03_GUI by default, not to
 01_Datasets_Paper.
 
-Pairs covered (one per patient, same_paper):
+Pair covered (same_paper):
     11_human-crc-p2 <-> 11_human-crc-p2
-    11_human-crc-p5 <-> 11_human-crc-p5
 
 Paper: Oliveira et al., Nature Genetics 2025, "High-definition spatial
 transcriptomic profiling of immune cell populations in colorectal cancer"
-(https://doi.org/10.1038/s41588-025-02193-3; GEO SuperSeries GSE280318). Per
-patient, both sides come from one FFPE block: the Flex reference was dissociated
-from curls serial to the sections the spatial assays used.
+(https://doi.org/10.1038/s41588-025-02193-3; GEO SuperSeries GSE280318). Both
+sides come from one FFPE block: the Flex reference was dissociated from
+curls serial to the sections the spatial assays used.
 
-Downloads per patient: four Flex libraries, the authors' metadata and three
-Xenium files (P2 ~460 MB, P5 ~330 MB; the segmentation is most of it).
+Downloads: four Flex libraries, the authors' metadata and three Xenium files
+(~460 MB; the segmentation is most of it).
 
 ------------------------------------------------------------------------------
-scRNA  11_human-crc-p{2,5}.h5ad   —  Chromium Flex
+scRNA  11_human-crc-p2.h5ad   —  Chromium Flex
 ------------------------------------------------------------------------------
   counts      GSE280311 (Flex). Each patient is one probe barcode in four
-              libraries: P2CRC = BC1 in pool 1 (GSM8594533..36, *_P1L{1..4}_*),
-              P5CRC = BC3 in pool 2 (GSM8594537..40, *_P2L{1..4}_*);
+              libraries: P2CRC = BC1 in pool 1 (GSM8594533..36, *_P1L{1..4}_*);
               files *_count_filtered_feature_bc_matrix.h5
   annotation  github.com/10XGenomics/HumanColonCancer_VisiumHD,
               MetaData/SingleCell_MetaData.csv.gz (all 8 Flex samples)
 
 The authors' barcodes carry the cellranger-aggr index as suffix (pool 1: two
-samples per library, pool 2: four), so P2CRC's libraries are aggr samples
-1, 3, 5, 7 and P5CRC's 11, 15, 19, 23. A patient's barcodes match its four
-matrices one to one; the authors' QC (``QCFilter == "Keep"``) selects the cells,
-kept in metadata order: P2 41933 -> 35673, P5 24615 -> 23823.
+samples per library), so P2CRC's libraries are aggr samples 1, 3, 5, 7. Its
+barcodes match the four matrices one to one; the authors' QC
+(``QCFilter == "Keep"``) selects the cells, kept in metadata order:
+41933 -> 35673.
 
 Curation:
   * obs  index = the authors' ``Barcode``; ``Level1`` and ``Level2`` verbatim.
            Level2 was sub-clustered within Level1 on a 15 % sketch and then
-           extended to all cells, so it is only mostly nested (P2: 3.8 % of
-           cells sit outside their Level2's main Level1); kept as published.
+           extended to all cells, so it is only mostly nested (3.8 % of cells
+           sit outside their Level2's main Level1); kept as published.
   * X    = the four matrices' columns for those barcodes, float32
   * var  index = gene symbols uppercased; three symbols occur twice and are
            summed onto the first occurrence, 18082 -> 18079
 
 ------------------------------------------------------------------------------
-ST  11_human-crc-p{2,5}.h5ad   —  Xenium, 422 genes (colon panel + 100 add-on)
+ST  11_human-crc-p2.h5ad   —  Xenium, 422 genes (colon panel + 100 add-on)
 ------------------------------------------------------------------------------
   https://cf.10xgenomics.com/samples/xenium/2.0.0/
-  Xenium_V1_Human_Colon_Cancer_P{2,5}_CRC_Add_on_FFPE/  (the GSE280314 samples)
+  Xenium_V1_Human_Colon_Cancer_P2_CRC_Add_on_FFPE/  (a GSE280314 sample)
     ..._cell_feature_matrix.h5, ..._cells.csv.gz, ..._cells.zarr.zip
 
 The full outs bundles (14-16 GB) are unnecessary. The authors' repo lists ~1.1M
-cells per slide for a larger Xenium region; the public 10x releases used here
-have P2 340837 and P5 275998 cells and carry no cell-type labels.
+cells per slide for a larger Xenium region; the public 10x release used here
+has 340837 cells and carries no cell-type labels.
 
 Curation:
   * cells in the Xenium output's own order; obs index = Xenium ``cell_id``
   * cells with fewer than 10 transcripts over the 422 genes are dropped
-           (P2 340837 -> 331383, P5 275998 -> 270956): mapped, they form
+           (340837 -> 331383): mapped, they form
            spurious states of near-empty cells
   * X    = the 422 ``Gene Expression`` features; unassigned / negative control
            codewords and probes are dropped
@@ -79,8 +77,8 @@ Usage
 
 Sources are downloaded to a temporary folder below --out-dir and deleted again.
 Set SPATIALAIM_KEEP_DOWNLOADS=1 to keep (and on a re-run reuse) them in
-<out-dir>/_downloads/11_human-crc-p{2,5} instead. The 4-5 GB masks are copied
-band by band, never held whole.
+<out-dir>/_downloads/11_human-crc-p2 instead. The ~5 GB mask is copied band
+by band, never held whole.
 """
 
 import logging
@@ -119,7 +117,7 @@ MIN_TRANSCRIPTS = 10
 
 @dataclass(frozen=True)
 class Patient:
-    patient: str  # the metadata's Patient value, e.g. "P5CRC"
+    patient: str  # the metadata's Patient value, e.g. "P2CRC"
     probe_barcode: str
     # (GSM, library, aggr index of this patient in the authors' barcodes, bytes)
     libraries: tuple[tuple[str, str, int, int], ...]
@@ -139,35 +137,19 @@ class Patient:
         return f"{XENIUM}/{sample}/{sample}"
 
 
-PATIENTS = (
-    Patient(
-        patient="P2CRC",
-        probe_barcode="BC1",
-        libraries=(
-            ("GSM8594533", "P1L1", 1, 26_874_789),
-            ("GSM8594534", "P1L2", 3, 27_306_204),
-            ("GSM8594535", "P1L3", 5, 27_294_024),
-            ("GSM8594536", "P1L4", 7, 26_361_551),
-        ),
-        n_cells=35673,
-        n_spots=340837,
-        n_spots_kept=331383,
-        xenium_bytes=(21_438_841, 18_562_765, 291_928_061),
+PATIENT = Patient(
+    patient="P2CRC",
+    probe_barcode="BC1",
+    libraries=(
+        ("GSM8594533", "P1L1", 1, 26_874_789),
+        ("GSM8594534", "P1L2", 3, 27_306_204),
+        ("GSM8594535", "P1L3", 5, 27_294_024),
+        ("GSM8594536", "P1L4", 7, 26_361_551),
     ),
-    Patient(
-        patient="P5CRC",
-        probe_barcode="BC3",
-        libraries=(
-            ("GSM8594537", "P2L1", 11, 9_062_161),
-            ("GSM8594538", "P2L2", 15, 9_081_608),
-            ("GSM8594539", "P2L3", 19, 9_784_770),
-            ("GSM8594540", "P2L4", 23, 9_630_123),
-        ),
-        n_cells=23823,
-        n_spots=275998,
-        n_spots_kept=270956,
-        xenium_bytes=(15_479_659, 14_803_142, 248_276_261),
-    ),
+    n_cells=35673,
+    n_spots=340837,
+    n_spots_kept=331383,
+    xenium_bytes=(21_438_841, 18_562_765, 291_928_061),
 )
 
 
@@ -327,11 +309,11 @@ def main() -> None:
     args = parser.parse_args()
     sc_dir, st_dir = _common.prepare_dirs(args.out_dir)
 
-    for p in PATIENTS:
-        with _common.staging(args.out_dir, p.name) as tmp_dir:
-            build_scrna(p, tmp_dir, sc_dir / f"{p.name}.h5ad")
-            build_st(p, tmp_dir, st_dir)
-        logger.info("%s done", p.name)
+    p = PATIENT
+    with _common.staging(args.out_dir, p.name) as tmp_dir:
+        build_scrna(p, tmp_dir, sc_dir / f"{p.name}.h5ad")
+        build_st(p, tmp_dir, st_dir)
+    logger.info("%s done", p.name)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
 """
-The "Choose K" card of a mapper tab: one linked line plot per criterion, the
-best K per criterion and overall (each a button moving the K slider), and the
-criterion-vs-criterion scatters in a dialog.
+The "Choose K" card of a mapper tab: one linked line plot per selection
+criterion, the best K per criterion and on all of them (each a button moving the
+K slider), and the criterion-vs-criterion scatters in a dialog.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +22,16 @@ from spatialaim.gui.render.ksweep import (
 from spatialaim.gui.views.cards import plot_card
 from spatialaim.gui.views.controls import set_ctrl_k
 from spatialaim.gui.widgets.linked_plot import picked_k
+
+# Plots per row in the card and in the scatter dialog.
+_PER_ROW = 3
+
+
+def _grid(n: int) -> Iterator:
+    """``n`` Streamlit columns, ``_PER_ROW`` to a row, so a plot keeps its width
+    however many there are."""
+    for start in range(0, n, _PER_ROW):
+        yield from st.columns(_PER_ROW)[: min(_PER_ROW, n - start)]
 
 
 def _pick_k_callback(state_key: str, ks_all: list[int]):
@@ -43,20 +54,21 @@ def _pick_k_callback(state_key: str, ks_all: list[int]):
 def _ksweep_scatter_dialog(
     mapper: str, score_table: pd.DataFrame, ks_all: list[int]
 ) -> None:
-    """The three criterion-vs-criterion scatters, kept out of the card body so the
+    """The criterion-vs-criterion scatters, kept out of the card body so the
     card itself stays short."""
     pareto_only = st.checkbox(
         "Show only pareto-optimal points",
         value=True,
         key=f"ks_pareto_{mapper}",
-        help="Keep only the K that no other K beats on all three criteria at once. "
-        "A criterion that could not be computed for a K counts as its worst "
-        "possible value.",
+        help=f"Keep only the K that no other K beats on all {len(scores.CRITERIA)} "
+        "criteria at once. A criterion that could not be computed for a K counts "
+        "as its worst possible value.",
     )
     mask = scores.pareto_mask(score_table) if pareto_only else None
     group = f"ksweep_scatter_{mapper}"
 
-    for col, (x_key, y_key) in zip(st.columns(3), scores.SCATTER_PAIRS):
+    pairs = scores.SCATTER_PAIRS
+    for col, (x_key, y_key) in zip(_grid(len(pairs)), pairs):
         with col:
             key = f"ks_scatter_{x_key}_{y_key}_{mapper}"
             plot_card(
@@ -78,7 +90,7 @@ def _ksweep_scatter_dialog(
         else ""
     )
     st.caption(
-        f"One dot per K, each criterion summarised by the harmonic mean of its two "
+        f"One dot per K, each criterion summarised by the harmonic mean of its "
         f"curves. {shown}Hover a dot to highlight that K in every panel and to show "
         "the grey label-shuffle null crosshair; click a dot to set the K slider. The "
         "axes span the nulls as well, so drag to zoom in on the dots."
@@ -99,57 +111,48 @@ def _select_k_callback(k: int, ks_all: list[int]):
 
 
 def _best_k_rows(score_table: pd.DataFrame) -> list[tuple[str, int, float, str]]:
-    """``(description, k, score, slug)`` for the best overall K and the best K per
-    criterion.
+    """``(description, k, score, slug)`` for the best K on all criteria and the
+    best K per criterion.
 
     Presentation wrapper around :func:`spatialaim.analysis.compare_ks.best_ks`, which the
     sweep also writes to ``k_selection.json`` — the card and the file therefore
     always agree. A criterion with no finite score anywhere is skipped rather than
     reported as a winner.
     """
-    best = scores.best_ks(score_table)
-    labels = (
-        {"overall": "**Best overall** (harmonic mean across the criteria):"}
-        | {
-            c.key: f"**Best {c.label.lower()}** (harmonic mean):"
-            for c in scores.CRITERIA
-        }
-        | {
-            f"{a}+{b}": f"**Best {scores.CRITERION[a].short.lower()} + "
-            f"{scores.CRITERION[b].short.lower()}** (harmonic mean):"
-            for a, b in scores.SCATTER_PAIRS
-        }
-    )
+    labels = {"all": "**Best on all criteria** (harmonic mean):"} | {
+        c.key: f"**Best {c.label.lower()}** (harmonic mean):" for c in scores.CRITERIA
+    }
     return [
         (labels[slug], hit[0], hit[1], slug)
-        for slug, hit in best.items()
+        for slug, hit in scores.best_ks(score_table).items()
         if hit is not None
     ]
 
 
-def best_overall_k(root: Path) -> int | None:
-    """One mapper's best overall K, or ``None`` while its sweep table is missing
-    or nothing in it could be scored yet. Same source as the "Choose K" card."""
+def best_k_all(root: Path) -> int | None:
+    """One mapper's best K on all criteria, or ``None`` while its sweep table is
+    missing or nothing in it could be scored yet. Same source as the "Choose K"
+    card."""
     df = data_access.ksweep_table(root)
     if df is None or df.empty:
         return None
-    hit = scores.best_ks(scores.score_table(df)).get("overall")
+    hit = scores.best_ks(scores.score_table(df)).get("all")
     return None if hit is None else int(hit[0])
 
 
 def render_choose_k(
     mapper: str, root: Path, ks_all: list[int], current_k: int | None = None
 ) -> None:
-    """The "Choose K" card: one line plot per criterion (its two curves plus their
-    harmonic mean), each criterion's winning K below it, the best overall K below
-    them, and the criterion-vs-criterion scatters behind a button.
+    """The "Choose K" card: one line plot per selection criterion (its curves plus
+    their harmonic mean), each criterion's winning K below it, the best K on all
+    criteria below them, and the criterion-vs-criterion scatters behind a button.
 
-    The line plots are linked: hovering a dot highlights the same K in all three,
-    clicking one moves the K slider. Every number here — the nulls included — is
-    read from the sweep's ``k_comparison.csv``.
+    The line plots are linked: hovering a dot highlights the same K in all of
+    them, clicking one moves the K slider. Every number here — the nulls included
+    — is read from the sweep's ``k_comparison.csv``.
 
     Collapsed, the card is a dead end unless its header says where things stand, so
-    the label carries the K on show and the best overall K.
+    the label carries the K on show and the best K on all criteria.
     """
     df = data_access.ksweep_table(root)
     if df is None or df.empty:
@@ -159,16 +162,16 @@ def render_choose_k(
     best = {
         slug: (text, k, value) for text, k, value, slug in _best_k_rows(score_table)
     }
-    # The best overall K is marked in all three cards, so the plots and the rows
-    # below agree on one K.
-    best_overall_k = best["overall"][1] if "overall" in best else None
+    # The best K on all criteria is marked in every card, so the plots and the
+    # rows below agree on one K.
+    best_all_k = best["all"][1] if "all" in best else None
 
     label = "Choose K (number of cell types)"
     state = []
     if current_k is not None:
         state.append(f"showing K = {current_k}")
-    if best_overall_k is not None:
-        state.append(f"best overall K = {best_overall_k}")
+    if best_all_k is not None:
+        state.append(f"best K on all criteria = {best_all_k}")
     if state:
         label += " — " + ", ".join(state)
 
@@ -197,9 +200,9 @@ def render_choose_k(
             )
             row.markdown(text)
             # Star the K the plots mark — on every row that lands on it, not just
-            # the 'best overall' one. Starred rows get their own key prefix so the
+            # the 'all criteria' one. Starred rows get their own key prefix so the
             # CSS above can tint just that icon.
-            starred = k == best_overall_k
+            starred = k == best_all_k
             prefix = "ks_bestkstar" if starred else "ks_bestk"
             row.button(
                 f"K = {k}",
@@ -210,14 +213,16 @@ def render_choose_k(
                 help=f"Score {value:.2f}. Moves the K slider to K = {k}.",
             )
 
-        # Each criterion's best K sits under its own plot; the overall winner —
-        # which spans all three — gets its own row below them.
-        for col, (index, criterion) in zip(st.columns(3), enumerate(scores.CRITERIA)):
+        # Each criterion's best K sits under its own plot; the winner on all of
+        # them gets its own row below them. The colours continue across the
+        # cards, so no two curves share one.
+        color_offset = 0
+        for col, criterion in zip(_grid(len(scores.CRITERIA)), scores.CRITERIA):
             with col:
                 key = f"ks_{criterion.key}_{mapper}"
                 plot_card(
                     render_ksweep_criterion_figure(
-                        df, criterion, index=index, best_k=best_overall_k
+                        df, criterion, color_offset=color_offset, best_k=best_all_k
                     ),
                     key=key,
                     stem=f"{mapper}_ksweep_{criterion.key}",
@@ -225,18 +230,19 @@ def render_choose_k(
                     on_pick=_pick_k_callback(key, ks_all),
                 )
                 _best_k_row(criterion.key)
+            color_offset += len(criterion.columns)
 
         st.divider()
         if not best:
             st.caption("No criterion could be scored for this run yet.")
-        _best_k_row("overall")
+        _best_k_row("all")
 
-        if st.button(
+        if len(scores.SCATTER_PAIRS) and st.button(
             "Compare criteria against each other",
             key=f"ks_scatter_btn_{mapper}",
             width="stretch",
-            help="Opens the three criterion-vs-criterion scatter plots (one dot "
-            "per K) with the pareto filter.",
+            help=f"Opens the {len(scores.SCATTER_PAIRS)} criterion-vs-criterion "
+            "scatter plots (one dot per K) with the pareto filter.",
         ):
             _ksweep_scatter_dialog(mapper, score_table, ks_all)
 

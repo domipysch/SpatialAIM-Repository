@@ -51,14 +51,19 @@ def k_slider(ks: list[int], default_k: int | None = None) -> int:
 
 def k_nav_buttons(ks: list[int], k: int, best: int | None, pareto: list[int]) -> None:
     """Three buttons beside the K slider: the next lower Pareto-optimal K, back to
-    the best overall K, and the next higher Pareto-optimal K. Each is disabled
+    the best K on all criteria, and the next higher Pareto-optimal K. Each is disabled
     when it has nowhere to go."""
     lower = max((p for p in pareto if p < k and p in ks), default=None)
     higher = min((p for p in pareto if p > k and p in ks), default=None)
     row = st.container(horizontal=True, gap="small")
     for label, target, key, help_ in (
         ("← Pareto K", lower, "k_nav_lower", "Next lower Pareto-optimal K"),
-        ("↺ Best K", best if best != k else None, "k_nav_best", "Best overall K"),
+        (
+            "↺ Best K",
+            best if best != k else None,
+            "k_nav_best",
+            "Best K on all criteria",
+        ),
         ("Pareto K →", higher, "k_nav_higher", "Next higher Pareto-optimal K"),
     ):
         row.button(

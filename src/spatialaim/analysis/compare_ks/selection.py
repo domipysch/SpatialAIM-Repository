@@ -3,37 +3,47 @@ Choosing K from the score table: the best K, and the Pareto-optimal Ks.
 """
 
 from __future__ import annotations
-
+from collections.abc import Iterable
+from itertools import combinations
 import numpy as np
 import pandas as pd
+from ..registry import SELECTION_CRITERIA
+from .scoring import column_values, combined_score
 
-from .criteria import CRITERIA, SCATTER_PAIRS
-from .scoring import column_values, overall
 
-
-def best_ks(table: pd.DataFrame) -> dict[str, tuple[int, float] | None]:
-    """The best ``(k, score)`` overall, per criterion and per pair of criteria,
-    as ``{"overall": ..., "<criterion key>": ..., "<key a>+<key b>": ...}``.
-    A pair's score is the harmonic mean of its two criterion scores, as
-    ``overall`` is of all three. ``None`` where no K has a finite score."""
-    out: dict[str, tuple[int, float] | None] = {
-        "overall": _best_k(table, overall(table))
-    }
-    for criterion in CRITERIA:
-        values = pd.to_numeric(table[criterion.key], errors="coerce").to_numpy(
-            dtype=float
-        )
-        out[criterion.key] = _best_k(table, values)
-    for a, b in SCATTER_PAIRS:
-        out[f"{a}+{b}"] = _best_k(table, overall(table, (a, b)))
+def best_ks(
+    table: pd.DataFrame, keys: Iterable[str] | None = None
+) -> dict[str, tuple[int, float] | None]:
+    """The best ``(k, score)`` on all criteria ``keys`` (default
+    ``SELECTION_CRITERIA``) and per criterion, as ``{"all": ..., "<key>": ...}``;
+    ``None`` where no K has a finite score."""
+    keys = tuple(keys or SELECTION_CRITERIA)
+    out = {"all": _best_k(table, combined_score(table, keys))}
+    for key in keys:
+        out[key] = _best_k(table, column_values(table, key, len(table)))
     return out
 
 
-def pareto_mask(table: pd.DataFrame, keys: tuple[str, ...] | None = None) -> np.ndarray:
+def best_combination_ks(
+    table: pd.DataFrame, keys: Iterable[str] | None = None
+) -> dict[str, tuple[int, float] | None]:
+    """The best ``(k, score)`` for every combination of 2 to n - 1 of the n
+    criteria ``keys`` (default ``SELECTION_CRITERIA``), keyed
+    ``"<key a>+<key b>+..."``; a combination's score is the harmonic mean of its
+    criterion scores."""
+    keys = tuple(keys or SELECTION_CRITERIA)
+    return {
+        "+".join(combo): _best_k(table, combined_score(table, combo))
+        for size in range(2, len(keys))
+        for combo in combinations(keys, size)
+    }
+
+
+def pareto_mask(table: pd.DataFrame, keys: Iterable[str] | None = None) -> np.ndarray:
     """Which Ks are Pareto-optimal on the criterion scores ``keys`` (default:
-    all): no other K is at least as good on all and better on one. A NaN score
-    counts as the worst value."""
-    columns = keys or tuple(c.key for c in CRITERIA)
+    ``SELECTION_CRITERIA``): no other K is at least as good on all and better on
+    one. A NaN score counts as the worst value."""
+    columns = tuple(keys or SELECTION_CRITERIA)
     n = len(table)
     if n == 0:
         return np.zeros(0, dtype=bool)

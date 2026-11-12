@@ -4,11 +4,9 @@ reference and ST expression graphs.
 """
 
 from __future__ import annotations
-import json
 import logging
 from pathlib import Path
 import numpy as np
-import scanpy as sc
 from anndata import AnnData
 from spatialaim.adata_schema import (
     LAYER_LOGNORM,
@@ -17,37 +15,76 @@ from spatialaim.adata_schema import (
     OBSP_CONNECTIVITIES_SHARED_GENES,
     OBSP_ST_EXPR_CONNECTIVITIES,
 )
-from spatialaim.metrics.modularity import compute_modularity
+from .criterion import Criterion, finite
 
 logger = logging.getLogger(__name__)
 
 
-def analyse_modularities(
-    adata_sc: AnnData,
-    adata_st: AnnData,
-    output_data_dir: Path,
-):
-    """Write ``modularity_metrics.json``: the modularity of the states on the
-    reference's all-gene and shared-gene kNN graphs and on the ST expression
-    kNN graph."""
-    cell_states = adata_sc.obs[OBS_COMPUTED_STATE].astype(int).to_numpy()
+class Coherence(Criterion):
+    """Modularity of the states on the ST and reference expression graphs."""
 
-    modularity_all = compute_modularity(adata_sc, cell_states)
-    modularity_shared = compute_modularity(
-        adata_sc, cell_states, obsp_key=OBSP_CONNECTIVITIES_SHARED_GENES
-    )
-    modularity_st_expression = _spatial_expression_modularity(adata_st)
+    key = "coherence"
+    label = "Transcriptional coherence"
+    short = "Coherence"
+    unit = "modularity"
+    filename = "modularity_metrics.json"
+    columns = ("modularity_st_expression", "modularity_shared")
+    curve_labels = ("ST expression (mapping)", "SC shared-gene (reference)")
+    axis_from_zero = True
 
-    with open(output_data_dir / "modularity_metrics.json", "w") as f:
-        json.dump(
-            {
-                "modularity_all": float(modularity_all),
-                "modularity_shared": float(modularity_shared),
-                "modularity_st_expression": float(modularity_st_expression),
-            },
-            f,
-            indent=4,
-        )
+    def analyse(self, adata_sc, adata_st, start_cluster_to_state) -> dict:
+        """The modularity of the states on the reference's all-gene and
+        shared-gene kNN graphs and on the ST expression kNN graph."""
+        cell_states = adata_sc.obs[OBS_COMPUTED_STATE].astype(int).to_numpy()
+        return {
+            "modularity_all": compute_modularity(adata_sc, cell_states),
+            "modularity_shared": compute_modularity(
+                adata_sc, cell_states, obsp_key=OBSP_CONNECTIVITIES_SHARED_GENES
+            ),
+            "modularity_st_expression": _spatial_expression_modularity(adata_st),
+        }
+
+    def collect(self, data_dir: Path) -> dict[str, float]:
+        """The shared-gene reference and the ST expression modularity."""
+        modularity = self.load(data_dir)
+        return {
+            "modularity_shared": finite(modularity.get("modularity_shared")),
+            "modularity_st_expression": finite(
+                modularity.get("modularity_st_expression")
+            ),
+        }
+
+
+def compute_modularity(
+    adata: AnnData, labels: np.ndarray, obsp_key: str = "connectivities"
+) -> float:
+    """Modularity of ``labels`` on the kNN graph ``adata.obsp[obsp_key]``.
+    NaN if igraph is not installed or the graph does not exist."""
+    g = _igraph_from_obsp(adata, obsp_key)
+    if g is None:
+        return float("nan")
+    return float(g.modularity(np.asarray(labels).tolist()))
+
+
+def _igraph_from_obsp(adata: AnnData, obsp_key: str):
+    """``adata.obsp[obsp_key]`` as an undirected igraph without duplicate
+    edges or self-loops; ``None`` (with a warning) if igraph or the graph is
+    missing."""
+    try:
+        import igraph as ig
+    except ImportError:
+        logger.warning("igraph not available — skipping modularity")
+        return None
+
+    if obsp_key not in adata.obsp:
+        logger.warning("No precomputed neighbors graph — skipping modularity")
+        return None
+
+    A = adata.obsp[obsp_key].tocoo()
+    edges = list(zip(A.row.tolist(), A.col.tolist()))
+    g = ig.Graph(n=adata.n_obs, edges=edges, directed=False)
+    g.simplify()
+    return g
 
 
 def _spatial_expression_modularity(adata_st: AnnData) -> float:
@@ -55,6 +92,8 @@ def _spatial_expression_modularity(adata_st: AnnData) -> float:
     (all genes, lognorm, PCA). The graph is built on the first K and kept in
     ``adata_st.obsp``."""
     if OBSP_ST_EXPR_CONNECTIVITIES not in adata_st.obsp:
+        import scanpy as sc
+
         # Built on a copy so the PCA and neighbour keys stay off adata_st.
         st_expr = AnnData(
             X=adata_st.layers[LAYER_LOGNORM].copy(),

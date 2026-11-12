@@ -1,10 +1,10 @@
-"""Tests for the spatial assortativity in ``spatialaim.metrics.topology``."""
+"""Tests for the spatial assortativity in ``spatialaim.analysis.topology``."""
 
 import numpy as np
 import pytest
 import scipy.sparse as sp
 
-from spatialaim.metrics.topology import assortativity
+from spatialaim.analysis.topology import assortativity
 
 
 def _grid(n: int = 10) -> sp.coo_matrix:

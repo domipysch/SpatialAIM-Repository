@@ -1,6 +1,7 @@
 """
 The Overview page: every starting point × mapper of the pair output in one
-table, each at its own best overall K, so the best configuration stands out.
+table, each at its own best K on all criteria, so the best configuration stands
+out.
 """
 
 from __future__ import annotations
@@ -14,29 +15,35 @@ import streamlit as st
 from spatialaim.analysis import compare_ks as scores
 from spatialaim.gui import data_access
 
-# The overall score, then each criterion's score, with their column titles.
-_SCORES: dict[str, str] = {"overall": "Overall"} | {
+# The score on all criteria, then each criterion's score, with their column titles.
+_SCORES: dict[str, str] = {"all": "All criteria"} | {
     c.key: c.short for c in scores.CRITERIA
 }
 
-HELP_OVERVIEW = """
-Every combination of starting clusters and mapping method, each at the K its own
-sweep proposes (its best overall K), with the overall score and each criterion's
-score at that K. Sorted by the overall score; click a column header to sort by
-another one.
+_COHERENCE_CAVEAT = """
 
-All scores share one scale across starts and methods: reconstruction is a cosine
-similarity, spatial organisation a chance-corrected assortativity, coherence a
-modularity. One caveat: the reference half of coherence (the modularity of the
-states on the reference's shared-gene graph) favours the Leiden start, whose
-clusters are themselves Leiden clusters of a closely related graph.
-"""
+One caveat: the reference half of coherence (the modularity of the states on the
+reference's shared-gene graph) favours the Leiden start, whose clusters are
+themselves Leiden clusters of a closely related graph."""
+
+HELP_OVERVIEW = (
+    """
+Every combination of starting clusters and mapping method, each at the K its own
+sweep proposes (its best K on all criteria), with the score on all criteria and
+each criterion's score at that K. Sorted by the score on all criteria; click a
+column header to sort by another one.
+
+All scores share one scale across starts and methods: """
+    + "; ".join(f"{c.label.lower()} in {c.unit}" for c in scores.CRITERIA)
+    + "."
+    + (_COHERENCE_CAVEAT if "coherence" in {c.key for c in scores.CRITERIA} else "")
+)
 
 
 def overview_table(starts: list[data_access.Start]) -> pd.DataFrame:
     """One row per start × mapper with a K comparison: ``start`` (label),
-    ``folder`` (start folder name), ``mapper``, ``best_k`` (best overall K) and the
-    overall and criterion scores at that K (NaN without a scored K)."""
+    ``folder`` (start folder name), ``mapper``, ``best_k`` (best K on all criteria) and
+    the scores on all criteria and per criterion at that K (NaN without a scored K)."""
     rows = []
     for start in starts:
         for mapper in data_access.list_mappers(start.folder):
@@ -44,8 +51,8 @@ def overview_table(starts: list[data_access.Start]) -> pd.DataFrame:
             if df is None or df.empty:
                 continue
             table = scores.score_table(df)
-            table["overall"] = scores.overall(table)
-            hit = scores.best_ks(table)["overall"]
+            table["all"] = scores.combined_score(table)
+            hit = scores.best_ks(table)["all"]
             row = {"start": start.label, "folder": start.folder.name, "mapper": mapper}
             at_best = table[table["k"] == hit[0]].iloc[0] if hit else None
             row["best_k"] = hit[0] if hit else np.nan
@@ -90,7 +97,7 @@ def overview_view(
 
     shown = table[
         table["start"].isin(shown_starts) & table["mapper"].isin(shown_mappers)
-    ].sort_values("overall", ascending=False, na_position="last")
+    ].sort_values("all", ascending=False, na_position="last")
     picked = st.dataframe(
         shown.drop(columns="folder")
         .rename(columns={"start": "starting clusters", "best_k": "best K", **_SCORES})

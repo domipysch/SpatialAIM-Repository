@@ -50,4 +50,4 @@ def test_overview_table(tmp_path):
     # K = 3: recon 0.6, spatial 0.5, coherence 0.4 -> harmonic mean ≈ 0.486,
     # beating K = 2 (0.5, 0.6, 0.3 -> ≈ 0.429).
     assert list(table["best_k"]) == [3, 3]
-    assert table["overall"].iloc[0] == pytest.approx(3 / (1 / 0.6 + 1 / 0.5 + 1 / 0.4))
+    assert table["all"].iloc[0] == pytest.approx(3 / (1 / 0.6 + 1 / 0.5 + 1 / 0.4))

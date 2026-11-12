@@ -19,7 +19,7 @@ import streamlit as st
 from spatialaim import MAPPING_CHOICES
 from spatialaim.gui import compute, data_access, demo
 from spatialaim.gui.render.markers import marker_poller
-from spatialaim.gui.views.choose_k import best_overall_k, pareto_ks
+from spatialaim.gui.views.choose_k import best_k_all, pareto_ks
 from spatialaim.gui.views.compare_tab import compare_tab
 from spatialaim.gui.views.controls import (
     Controls,
@@ -47,14 +47,14 @@ class ViewContext(NamedTuple):
 
 
 def focus(start: data_access.Start, mapper: str) -> None:
-    """Show ``mapper`` in ``start`` at its best overall K (on the next render of
+    """Show ``mapper`` in ``start`` at its best K on all criteria (on the next render of
     the Explore page). Safe in a callback and before ``st.switch_page``."""
     st.session_state[_VIEW_START] = start.folder.name
     st.session_state[_VIEW_MAPPER] = mapper
     st.session_state.pop(_START_WIDGET, None)
     st.session_state.pop(_MAPPER_WIDGET, None)
     root = data_access.run_root(start.folder, mapper)
-    select_k(data_access.list_ks(root), best_overall_k(root))
+    select_k(data_access.list_ks(root), best_k_all(root))
 
 
 def _start_args(ctx: ViewContext, start: data_access.Start) -> argparse.Namespace:
@@ -158,7 +158,7 @@ def explore_page(ctx: ViewContext) -> None:
         if mapper is None:
             return
         root = data_access.run_root(start.folder, mapper)
-        select_k(data_access.list_ks(root), best_overall_k(root))
+        select_k(data_access.list_ks(root), best_k_all(root))
 
     col_start, col_mapper, col_k, col_nav = st.columns(
         [2, 2, 9, 3], vertical_alignment="bottom"
@@ -188,7 +188,7 @@ def explore_page(ctx: ViewContext) -> None:
         run is None or run.finished(start.annotation)
     )
     ks = data_access.list_ks(root) if done else []
-    best = best_overall_k(root) if done else None
+    best = best_k_all(root) if done else None
     ctrl = None
     if ks:
         with col_k:
@@ -197,9 +197,9 @@ def explore_page(ctx: ViewContext) -> None:
             k_nav_buttons(ks, k, best, pareto_ks(root))
         ctrl = Controls(k)
         note = (
-            " (best overall)"
+            " (best on all criteria)"
             if k == best
-            else (f", best overall K = {best}" if best else "")
+            else (f", best K on all criteria = {best}" if best else "")
         )
         st.caption(f"**{start.label}** · **{mapper}** · K = {k}{note}")
     mapper_tab(mapper, args, ctx.runs, ctx.queue, ctrl, ks)
@@ -227,7 +227,7 @@ def compare_page(ctx: ViewContext) -> None:
         }
     )
     with col_k:
-        k = k_slider(ks, best_overall_k(data_access.run_root(start.folder, mappers[0])))
+        k = k_slider(ks, best_k_all(data_access.run_root(start.folder, mappers[0])))
     compare_tab(mappers, _start_args(ctx, start), Controls(k))
     marker_poller()
 
@@ -253,6 +253,6 @@ def reference_page(ctx: ViewContext) -> None:
         }
     )
     with col_k:
-        k = k_slider(ks, best_overall_k(data_access.run_root(start.folder, mappers[0])))
+        k = k_slider(ks, best_k_all(data_access.run_root(start.folder, mappers[0])))
     reference_tab(mappers, _start_args(ctx, start), Controls(k))
     marker_poller()

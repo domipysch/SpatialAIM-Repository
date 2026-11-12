@@ -1,7 +1,7 @@
 """
-The "Choose K" figures: one line card per criterion (its two curves over K plus
+The "Choose K" figures: one line card per criterion (its curves over K plus
 their harmonic mean, see ``spatialaim/analysis/compare_ks/scoring.py``) and one
-scatter per criterion pair (one dot per K, at its two harmonic means).
+scatter per criterion pair (one dot per K, at the two criterion scores).
 
 All are linked client-side by ``widgets.linked_plot``: every K-indexed trace
 carries ``customdata[i][0] = K`` -- that is what the component keys hovering,
@@ -27,7 +27,7 @@ _NULL_COLOR = "#7c828a"
 
 _RING_COLOR = "#22262b"
 
-# Marks the best overall K in every criterion card: amber rather than pure yellow,
+# Marks the best K on all criteria in every criterion card: amber rather than pure yellow,
 # which is unreadable on white. Public because the GUI tints the matching ★ in the
 # "Best K" buttons with it.
 BEST_K_COLOR = "#e0a800"
@@ -61,26 +61,32 @@ def _null_text(value: float) -> str:
 
 
 def render_ksweep_criterion_figure(
-    df, criterion, *, index: int = 0, height: int = 300, best_k: int | None = None
+    df,
+    criterion,
+    *,
+    color_offset: int = 0,
+    height: int = 300,
+    best_k: int | None = None,
 ) -> go.Figure:
-    """The line card for one criterion: its two curves over K plus their harmonic
-    mean (the score the scatter cards below plot against each other).
+    """The line card for one criterion: its curves over K plus, for more than
+    one, their harmonic mean (the score the scatter cards plot against each
+    other; with one curve the score is that curve).
 
-    ``index`` picks the criterion's colour pair out of the shared palette.
+    ``color_offset`` is the palette index of the criterion's first curve.
 
     ``best_k`` marks one K with an amber dashed line and a star on the x-axis (the
-    best overall K, so the same K is marked in all three cards). It is drawn as a
+    best K on all criteria, so the same K is marked in every card). It is drawn as a
     shape plus an annotation, not a trace, so it stays out of the legend and out of
     the linked-plot component's K bookkeeping.
     """
     k = df["k"].to_numpy()
-    curve_a, curve_b = scores.curves(df, criterion)
-    palette = (mapper_color(2 * index), mapper_color(2 * index + 1))
+    curves = scores.curves(df, criterion)
 
     fig = go.Figure()
-    for column, label, values, color in zip(
-        criterion.columns, criterion.curve_labels, (curve_a, curve_b), palette
+    for i, (column, label, values) in enumerate(
+        zip(criterion.columns, criterion.curve_labels, curves)
     ):
+        color = mapper_color(color_offset + i)
         if column not in df.columns:
             continue
         hover = f"{label}<br>K %{{customdata[0]:.0f}}<br>%{{y:.3f}}<extra></extra>"
@@ -101,30 +107,31 @@ def render_ksweep_criterion_figure(
             )
         )
 
-    combined = scores.harmonic_mean(curve_a, curve_b)
-    fig.add_trace(
-        go.Scatter(
-            x=k,
-            y=combined,
-            customdata=_k_customdata(k),
-            mode="lines+markers",
-            name="harmonic mean",
-            line=dict(color=_COMBINED_COLOR, dash="dash", width=2),
-            # The mean is undefined wherever either curve is (a K with no
-            # per-cell-type assortativity, say); bridge those Ks rather than break
-            # the line, the missing markers already show where they are.
-            connectgaps=True,
-            marker=dict(
-                color=_COMBINED_COLOR,
-                size=_MARKER_SIZE,
-                symbol="diamond",
-                line=dict(width=0, color=_RING_COLOR),
-            ),
-            hovertemplate=(
-                "harmonic mean<br>K %{customdata[0]:.0f}<br>%{y:.3f}<extra></extra>"
-            ),
+    if len(curves) > 1:
+        fig.add_trace(
+            go.Scatter(
+                x=k,
+                y=scores.harmonic_mean(*curves),
+                customdata=_k_customdata(k),
+                mode="lines+markers",
+                name="harmonic mean",
+                line=dict(color=_COMBINED_COLOR, dash="dash", width=2),
+                # The mean is undefined wherever any curve is (a K with no
+                # per-cell-type assortativity, say); bridge those Ks rather than
+                # break the line, the missing markers already show where they are.
+                connectgaps=True,
+                marker=dict(
+                    color=_COMBINED_COLOR,
+                    size=_MARKER_SIZE,
+                    symbol="diamond",
+                    line=dict(width=0, color=_RING_COLOR),
+                ),
+                hovertemplate=(
+                    "harmonic mean<br>K %{customdata[0]:.0f}<br>%{y:.3f}"
+                    "<extra></extra>"
+                ),
+            )
         )
-    )
 
     extra_layout: dict = {}
     if best_k is not None:
@@ -155,7 +162,7 @@ def render_ksweep_criterion_figure(
                 showlegend=False,
                 cliponaxis=False,
                 hoverinfo="text",
-                hovertext=f"best overall K = {int(best_k)}",
+                hovertext=f"best K on all criteria = {int(best_k)}",
             )
         )
         extra_layout["yaxis2"] = dict(

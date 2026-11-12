@@ -25,7 +25,7 @@ You are invited to add and try out your mapper of choice!
 If you also want to start Step 1 from your own annotations,
 `--annotation` runs the sweep a second time (once per annotation) with an existing annotation's `L` cell types as the start clusters.
 
-![aim_figure](./docs/figure_2_1.png)
+![aim_figure](./docs/figure_1.png)
 
 ## Outline
 
@@ -140,7 +140,7 @@ spatialaim gui [--server_port 8501]
 Open the printed URL (default http://localhost:8501), set the inputs, pick one or multiple mapper(s), and click **Run**.
 As soon as both `.h5ad` paths are set, the GUI runs the same checks as [`spatialaim validate`](#validate-a-dataset-pair-spatialaim-validate) on that pair: a clean pair is confirmed with a tick in the sidebar, any error or warning is shown in a dialog you can close to continue anyway.
 The GUI always runs from the Leiden over-clustering; pick annotations under *Also start from annotations* to additionally start from them (the same as `--annotation`).
-It writes the same layout as the CLI, `<output_dir>/<start>/<mapper>/`. The results are pages in a top navigation: **Overview** (a table of every starting point × mapper at its best overall K, sorted by the overall score; a selected row opens it in Explore), **Explore** (pick starting clusters, method and K in one control bar; switching start or method lands on that combination's best K), **Compare** (several methods of one starting point side by side, once two have finished) and **Single-cell reference**.
+It writes the same layout as the CLI, `<output_dir>/<start>/<mapper>/`. The results are pages in a top navigation: **Overview** (a table of every starting point × mapper at its best K on all criteria, sorted by that score; a selected row opens it in Explore), **Explore** (pick starting clusters, method and K in one control bar; switching start or method lands on that combination's best K), **Compare** (several methods of one starting point side by side, once two have finished) and **Single-cell reference**.
 Once an output folder holds results, its linkage is fixed. Mappers and annotations can still be added: the next *Run* computes every missing starting point × mapper combination. Output folders written by earlier versions (`<output_dir>/<mapper>/`) can still be opened and viewed.
 An optional **Segmentation path** (the ST slice's cell segmentation mask, see the sidebar's *Info*) is validated with the pair and passed to the runs; their Explore views then get a "Shape features" card (shape consistency and the cells' area / eccentricity / solidity per cell type), and the cell-type modal a "Shape features" view. Without it the GUI is unchanged.
 
@@ -216,7 +216,7 @@ Each pair is written to `<out_dir>/<PairID>_<scName>__<stName>/`.
         │   ├── start_cluster_to_state.csv        # which state each start cluster belongs to
         │   └── analysis/                         # the metrics for this K (the GUI plots them)
         ├── k_comparison.csv       # one row per K: all metrics and the K-selection scores
-        ├── k_selection.json       # the suggested K, overall and per criterion
+        ├── k_selection.json       # the suggested K: per criterion, on all criteria and per combination of them
         └── timing.csv             # wall-clock seconds per K of the mapping and of the analysis
 ```
 
@@ -301,3 +301,62 @@ It is then selectable everywhere automatically:
 
 Create a PR with those changes to make it available for all users!
 
+### Adding another criterion
+
+Criteria are pluggable.
+Each criterion measures every `K`'s mapping, writes its metrics to `k_<kkk>/analysis/`, and contributes columns to `k_comparison.csv`; its score per `K` is the harmonic mean of those columns.
+The framework learns about it from one **registry**, [`src/spatialaim/analysis/registry.py`](src/spatialaim/analysis/registry.py).
+
+Adding a criterion is three steps:
+
+**1. Write `src/spatialaim/analysis/<name>.py`** with a subclass of `Criterion` ([`src/spatialaim/analysis/criterion.py`](src/spatialaim/analysis/criterion.py)):
+
+```python
+from .criterion import Criterion, finite
+
+class MyCriterion(Criterion):
+    key = "mine"                          # name in the score table and k_selection.json
+    label = "My criterion"                # card title in the GUI
+    short = "Mine"                        # short label in the GUI's scatter titles
+    unit = "what it measures"             # y-axis title in the GUI
+    filename = "my_metrics.json"          # written to each k_<kkk>/analysis/
+    columns = ("mine_a", "mine_b")        # k_comparison.csv columns combined into the score
+    curve_labels = ("variant a", "variant b")
+
+    def analyse(self, adata_sc, adata_st, start_cluster_to_state) -> dict:
+        ...                               # this K's metrics, as a JSON-serialisable dict
+        return {"a": value_a, "b": value_b}
+
+    def collect(self, data_dir) -> dict[str, float]:
+        metrics = self.load(data_dir)     # the dict analyse returned, read back from disk
+        return {"mine_a": finite(metrics.get("a")), "mine_b": finite(metrics.get("b"))}
+```
+
+|                | Contract                                                                                                                                                                                                                         |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`analyse`**  | gets the current `K`: `adata_st.obsm["mapping_soft"]` (spots × states), `adata_st.obs["mapping_hard"]` (each spot's state), `adata_sc.obs["computed_state"]` (each cell's state) and `start_cluster_to_state`; returns this K's metrics |
+| **`collect`**  | returns at least every name in `columns`; optionally `<column>_null` as that column's chance level, and further columns that are only reported                                                                                  |
+| **`columns`**  | higher is better and ≥ 0, ideally on a 0–1 scale like the other criteria (a negative value makes the score NaN); names must not clash with existing `k_comparison.csv` columns                                                  |
+
+**2. Register it**
+
+Add an instance to `REGISTRY` ([`src/spatialaim/analysis/registry.py`](src/spatialaim/analysis/registry.py)):
+
+```python
+for c in (Reconstruction(), SpatialOrganisation(), Coherence(), ShapeConsistency(), MyCriterion())
+```
+
+It is then computed for every `K` of every run and reported in `k_comparison.csv`.
+
+**3. Optionally let it select `K`**
+
+Add its key to `SELECTION_CRITERIA` in the same file. It then counts towards the best `K`:
+
+- `k_selection.json` (in `single`, `all` and `combinations`)
+- `spatialaim gui` (its own plot in the "Choose K" card, its best `K`, the best `K` on all criteria, the Pareto-optimal `K`s and the criterion trade-off scatters)
+
+Removing a key from `SELECTION_CRITERIA` takes the criterion out of all of these again.
+
+**4. Create PR**
+
+Create a PR with those changes to make it available for all users!
